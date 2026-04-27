@@ -1,0 +1,17 @@
+{
+  "name": "superfund",
+  "version": "1.0.0",
+  "description": "atproto tooling",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm -F labeller dev",
+    "start": "pnpm -F labeller start",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

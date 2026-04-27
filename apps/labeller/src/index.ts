@@ -33,7 +33,7 @@ const port = Number(process.env.PORT ?? 14831);
 
 const server = new LabelerServer({ did, signingKey, dbPath });
 await registerInternalRoutes(server, internalApiKey);
-server.start(port, (error, address) => {
+server.start({ port, host: "::" }, (error, address) => {
   if (error) {
     console.error("labeller failed to start", error);
     process.exit(1);

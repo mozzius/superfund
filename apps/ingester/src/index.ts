@@ -1,7 +1,7 @@
 import { Jetstream } from "@skyware/jetstream";
 import { createLabellerClient } from "labeller-client";
 import { createRedis } from "./redis.ts";
-import { classifyRecord, isFuckedUpReply } from "./classify.ts";
+import { claimedRoot, isFuckedUpReply } from "./classify.ts";
 import { createCursorStore } from "./cursor.ts";
 
 const labellerUrl = process.env.LABELLER_URL;
@@ -18,10 +18,10 @@ const labeller = createLabellerClient({ url: labellerUrl, apiKey: internalApiKey
 const redis = await createRedis(redisUrl);
 const cursor = createCursorStore(redis);
 
-const stats = { posts: 0, roots: 0, replies: 0, matched: 0, labelled: 0, errors: 0 };
+const stats = { posts: 0, replies: 0, matched: 0, labelled: 0, errors: 0 };
 const heartbeat = setInterval(() => {
   console.log(
-    `[stats] posts=${stats.posts} roots=${stats.roots} replies=${stats.replies} ` +
+    `[stats] posts=${stats.posts} replies=${stats.replies} ` +
       `matched=${stats.matched} labelled=${stats.labelled} errors=${stats.errors}`,
   );
 }, 10_000);
@@ -39,13 +39,11 @@ async function connect() {
     const did = event.did;
     const uri = `at://${did}/app.bsky.feed.post/${event.commit.rkey}`;
     const record = event.commit.record;
-    const shape = classifyRecord(record);
     stats.posts++;
-    if (shape === "R") stats.roots++;
-    else stats.replies++;
+    if (record.reply) stats.replies++;
 
     try {
-      await redis.set(`post:${uri}`, shape, { EX: postCacheTtlSeconds });
+      await redis.set(`post:${uri}`, claimedRoot(uri, record), { EX: postCacheTtlSeconds });
 
       if (await isFuckedUpReply(record, redis)) {
         stats.matched++;

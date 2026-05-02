@@ -62,8 +62,8 @@ export function registerDashboardRoutes(server: LabelerServer) {
     for (const row of rows) {
       if (row.val !== POST_LABEL) continue;
       const match = row.uri.match(/^at:\/\/([^/]+)\//);
-      if (!match) continue;
-      const did = match[1];
+      const did = match?.[1];
+      if (!did) continue;
       const account = accountByDid.get(did);
       if (!account) continue;
       account.posts.push({

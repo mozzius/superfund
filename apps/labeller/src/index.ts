@@ -1,5 +1,6 @@
 import { LabelerServer } from "@skyware/labeler";
 import { registerInternalRoutes } from "./internal.ts";
+import { registerDashboardRoutes } from "./dashboard.ts";
 
 const did = process.env.LABELER_DID;
 const signingKey = process.env.SIGNING_KEY;
@@ -33,6 +34,7 @@ const port = Number(process.env.PORT ?? 14831);
 
 const server = new LabelerServer({ did, signingKey, dbPath });
 await registerInternalRoutes(server, internalApiKey);
+registerDashboardRoutes(server);
 server.start({ port, host: "::" }, (error, address) => {
   if (error) {
     console.error("labeller failed to start", error);

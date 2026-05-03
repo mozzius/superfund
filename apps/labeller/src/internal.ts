@@ -1,17 +1,15 @@
 import type { LabelerServer } from "@skyware/labeler";
+import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import { routes, type SavedLabel } from "labeller-client";
 
-export async function registerInternalRoutes(server: LabelerServer, apiKey: string) {
-  // Skyware registers its own routes in a deferred microtask (see LabelerServer.js
-  // `this.app.register(fastifyWebsocket).then(() => { ... })`). If we mutate the
-  // Fastify instance synchronously, `app.listen` silently never binds. Yielding
-  // once lets skyware finish its own setup before we add ours.
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const app = server.app;
+export function createInternalServer(
+  labeler: LabelerServer,
+  apiKey: string,
+): FastifyInstance {
+  const app = Fastify();
 
-  app.addHook("preHandler", async (req, reply) => {
-    if (!req.url.startsWith("/internal/")) return;
+  app.addHook("onRequest", async (req, reply) => {
     if (req.headers.authorization !== `Bearer ${apiKey}`) {
       console.warn(`[internal] 401 ${req.method} ${req.url}`);
       reply.code(401).send({ error: "unauthorized" });
@@ -30,7 +28,7 @@ export async function registerInternalRoutes(server: LabelerServer, apiKey: stri
 
   app.post(routes.createLabels.path, async (req) => {
     const input = routes.createLabels.input.parse(req.body);
-    const labels = await server.createLabels(input.subject, {
+    const labels = await labeler.createLabels(input.subject, {
       create: input.create,
       negate: input.negate,
     });
@@ -67,7 +65,7 @@ export async function registerInternalRoutes(server: LabelerServer, apiKey: stri
       args.push(...sources);
     }
     const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const result = await server.db.execute({
+    const result = await labeler.db.execute({
       sql: `SELECT * FROM labels ${whereClause} ORDER BY id ASC LIMIT 250`,
       args,
     });
@@ -89,11 +87,11 @@ export async function registerInternalRoutes(server: LabelerServer, apiKey: stri
     const { subject, val, expiresInMs } = routes.upsertLabel.input.parse(req.body);
     const nowMs = Date.now();
 
-    const existing = await server.db.execute({
+    const existing = await labeler.db.execute({
       sql: `SELECT id, neg, exp FROM labels
               WHERE src = ? AND uri = ? AND val = ?
               ORDER BY id DESC LIMIT 1`,
-      args: [server.did, subject.uri, val],
+      args: [labeler.did, subject.uri, val],
     });
     const latest = existing.rows[0];
     const emitted: SavedLabel[] = [];
@@ -103,7 +101,7 @@ export async function registerInternalRoutes(server: LabelerServer, apiKey: stri
       !Number(latest.neg) &&
       (!latest.exp || Date.parse(String(latest.exp)) > nowMs);
     if (isActive) {
-      const neg = await server.createLabel({
+      const neg = await labeler.createLabel({
         uri: subject.uri,
         cid: subject.cid,
         val,
@@ -112,7 +110,7 @@ export async function registerInternalRoutes(server: LabelerServer, apiKey: stri
       emitted.push(neg as SavedLabel);
     }
 
-    const created = await server.createLabel({
+    const created = await labeler.createLabel({
       uri: subject.uri,
       cid: subject.cid,
       val,
@@ -121,4 +119,6 @@ export async function registerInternalRoutes(server: LabelerServer, apiKey: stri
     emitted.push(created as SavedLabel);
     return { labels: emitted };
   });
+
+  return app;
 }

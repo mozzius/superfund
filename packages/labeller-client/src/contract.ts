@@ -45,19 +45,19 @@ export const upsertLabelOutput = z.object({
 export const routes = {
   createLabels: {
     method: "POST",
-    path: "/internal/create-labels",
+    path: "/create-labels",
     input: createLabelsInput,
     output: createLabelsOutput,
   },
   queryLabels: {
     method: "POST",
-    path: "/internal/query-labels",
+    path: "/query-labels",
     input: queryLabelsInput,
     output: queryLabelsOutput,
   },
   upsertLabel: {
     method: "POST",
-    path: "/internal/upsert-label",
+    path: "/upsert-label",
     input: upsertLabelInput,
     output: upsertLabelOutput,
   },

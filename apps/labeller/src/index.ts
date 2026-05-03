@@ -1,6 +1,5 @@
 import { LabelerServer } from "@skyware/labeler";
-import { registerInternalRoutes } from "./internal.ts";
-import { registerDashboardRoutes } from "./dashboard.ts";
+import { createInternalServer } from "./internal.ts";
 
 const did = process.env.LABELER_DID;
 const signingKey = process.env.SIGNING_KEY;
@@ -14,7 +13,8 @@ if (!internalApiKey) {
 
 const volumePath = process.env.RAILWAY_VOLUME_MOUNT_PATH;
 const dbPath = volumePath ? `${volumePath}/labels.db` : "./labels.db";
-const port = Number(process.env.PORT ?? 14831);
+const publicPort = Number(process.env.PORT ?? 14831);
+const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
 
 /**
  * Has the following labels configured:
@@ -32,13 +32,20 @@ const port = Number(process.env.PORT ?? 14831);
  * Severity: Informational
  */
 
-const server = new LabelerServer({ did, signingKey, dbPath });
-await registerInternalRoutes(server, internalApiKey);
-registerDashboardRoutes(server);
-server.start({ port, host: "::" }, (error, address) => {
+const labeler = new LabelerServer({ did, signingKey, dbPath });
+labeler.start({ port: publicPort, host: "::" }, (error, address) => {
   if (error) {
-    console.error("labeller failed to start", error);
+    console.error("labeller public server failed to start", error);
     process.exit(1);
   }
-  console.log(`labeller listening on ${address}`);
+  console.log(`labeller public listening on ${address}`);
+});
+
+const internal = createInternalServer(labeler, internalApiKey);
+internal.listen({ port: internalPort, host: "::" }, (error, address) => {
+  if (error) {
+    console.error("labeller internal server failed to start", error);
+    process.exit(1);
+  }
+  console.log(`labeller internal listening on ${address}`);
 });

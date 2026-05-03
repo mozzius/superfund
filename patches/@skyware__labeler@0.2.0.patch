@@ -1,14 +1,69 @@
 diff --git a/dist/LabelerServer.js b/dist/LabelerServer.js
-index 5e57c5912c17427740c987c8cc72030452588094..0def112b3797611f9847bf9f896da009d16e3cfb 100644
+index 5e57c5912c17427740c987c8cc72030452588094..a0742339f17f99d377bfd5542daccd949151a34a 100644
 --- a/dist/LabelerServer.js
 +++ b/dist/LabelerServer.js
-@@ -56,7 +56,8 @@ export class LabelerServer {
-         }
-         this.dbInitLock = this.initializeDatabase();
-         this.app = fastify();
--        void this.app.register(fastifyWebsocket).then(() => {
-+        this.app.register(fastifyWebsocket);
-+        this.app.after(() => {
-             this.app.get("/xrpc/com.atproto.label.queryLabels", this.queryLabelsHandler);
-             this.app.post("/xrpc/tools.ozone.moderation.emitEvent", this.emitEventHandler);
-             this.app.get("/xrpc/com.atproto.label.subscribeLabels", { websocket: true }, this.subscribeLabelsHandler);
+@@ -317,31 +317,40 @@ export class LabelerServer {
+                 ws.terminate();
+             }
+             try {
+-                const result = await this.db.execute({
+-                    sql: `
+-						SELECT * FROM labels
+-						WHERE id > ?
+-						ORDER BY id ASC
+-					`,
+-                    args: [cursor],
++                const REPLAY_PAGE_SIZE = 1000;
++                const sendFramed = (bytes) => new Promise((resolve, reject) => {
++                    if (ws.readyState !== ws.OPEN) return reject(new Error("closed"));
++                    ws.send(bytes, (err) => err ? reject(err) : resolve());
+                 });
+-                for (const row of result.rows) {
+-                    const { id: seq, src, uri, cid, val, neg, cts, exp, sig } = row;
+-                    const label = {
+-                        src: src,
+-                        uri: uri,
+-                        val: val,
+-                        neg: Boolean(neg),
+-                        cts: cts,
+-                        ...(cid ? { cid: cid } : {}),
+-                        ...(exp ? { exp: exp } : {}),
+-                        ...(sig ? { sig: sig } : {}),
+-                    };
+-                    const bytes = frameToBytes("message", {
+-                        seq: Number(seq),
+-                        labels: [formatLabel(label)],
+-                    }, "#labels");
+-                    ws.send(bytes);
++                let fromId = cursor;
++                // eslint-disable-next-line no-constant-condition
++                while (true) {
++                    if (ws.readyState !== ws.OPEN) break;
++                    const page = await this.db.execute({
++                        sql: `SELECT * FROM labels WHERE id > ? ORDER BY id ASC LIMIT ?`,
++                        args: [fromId, REPLAY_PAGE_SIZE],
++                    });
++                    if (page.rows.length === 0) break;
++                    for (const row of page.rows) {
++                        const { id: seq, src, uri, cid, val, neg, cts, exp, sig } = row;
++                        const label = {
++                            src: src,
++                            uri: uri,
++                            val: val,
++                            neg: Boolean(neg),
++                            cts: cts,
++                            ...(cid ? { cid: cid } : {}),
++                            ...(exp ? { exp: exp } : {}),
++                            ...(sig ? { sig: sig } : {}),
++                        };
++                        const bytes = frameToBytes("message", {
++                            seq: Number(seq),
++                            labels: [formatLabel(label)],
++                        }, "#labels");
++                        await sendFramed(bytes);
++                        fromId = Number(seq);
++                    }
++                    if (page.rows.length < REPLAY_PAGE_SIZE) break;
+                 }
+             }
+             catch (e) {

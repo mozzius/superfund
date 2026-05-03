@@ -33,14 +33,7 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  */
 
 const labeler = new LabelerServer({ did, signingKey, dbPath });
-
-// Skyware registers fastifyWebsocket in a deferred microtask and only
-// wires up /xrpc/com.atproto.label.subscribeLabels after that promise
-// settles. If we call start() synchronously, listen() races the WS route
-// registration and subscribeLabels never binds. Yield once to let
-// skyware finish setting itself up.
-await new Promise<void>((resolve) => setImmediate(resolve));
-
+await labeler.app.ready();
 labeler.start({ port: publicPort, host: "::" }, (error, address) => {
   if (error) {
     console.error("labeller public server failed to start", error);

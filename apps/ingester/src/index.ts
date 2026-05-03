@@ -18,7 +18,7 @@ const labeller = createLabellerClient({ url: labellerUrl, apiKey: internalApiKey
 const redis = await createRedis(redisUrl);
 const cursor = createCursorStore(redis);
 
-const stats = {
+const makeStats = () => ({
   posts: 0,
   replies: 0,
   matched: 0,
@@ -27,34 +27,54 @@ const stats = {
   labellerCalls: 0,
   labellerErrors: 0,
   labellerTotalMs: 0,
-};
+  labellerMaxMs: 0,
+});
+let stats = makeStats();
+const totals = makeStats();
 const fmtMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+const HEARTBEAT_MS = 10_000;
 const heartbeat = setInterval(() => {
+  const window = stats;
+  stats = makeStats();
   const mem = process.memoryUsage();
-  const avgCallMs = stats.labellerCalls
-    ? Math.round(stats.labellerTotalMs / stats.labellerCalls)
+  const avgCallMs = window.labellerCalls
+    ? Math.round(window.labellerTotalMs / window.labellerCalls)
     : 0;
+  const postsPerSec = (window.posts / (HEARTBEAT_MS / 1000)).toFixed(1);
   console.log(
-    `[stats] posts=${stats.posts} replies=${stats.replies} ` +
-      `matched=${stats.matched} labelled=${stats.labelled} errors=${stats.errors} ` +
-      `labellerCalls=${stats.labellerCalls} labellerErrors=${stats.labellerErrors} ` +
-      `avgCallMs=${avgCallMs} rss=${fmtMB(mem.rss)} heap=${fmtMB(mem.heapUsed)}/${fmtMB(mem.heapTotal)} ` +
+    `[stats 10s] posts=${window.posts} (${postsPerSec}/s) replies=${window.replies} ` +
+      `matched=${window.matched} labelled=${window.labelled} errors=${window.errors} ` +
+      `labellerCalls=${window.labellerCalls} labellerErrors=${window.labellerErrors} ` +
+      `avgCallMs=${avgCallMs} maxCallMs=${window.labellerMaxMs} ` +
+      `rss=${fmtMB(mem.rss)} heap=${fmtMB(mem.heapUsed)}/${fmtMB(mem.heapTotal)} ` +
+      `totalPosts=${totals.posts} totalLabelled=${totals.labelled} totalErrors=${totals.errors} ` +
       `uptimeSec=${Math.round(process.uptime())}`,
   );
-}, 10_000);
+}, HEARTBEAT_MS);
 heartbeat.unref();
+
+const bump = (key: keyof ReturnType<typeof makeStats>, by = 1) => {
+  stats[key] += by;
+  totals[key] += by;
+};
 
 const timeLabellerCall = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
   const startedAt = Date.now();
-  stats.labellerCalls++;
+  bump("labellerCalls");
   try {
     const result = await fn();
-    stats.labellerTotalMs += Date.now() - startedAt;
+    const durMs = Date.now() - startedAt;
+    bump("labellerTotalMs", durMs);
+    if (durMs > stats.labellerMaxMs) stats.labellerMaxMs = durMs;
+    if (durMs > totals.labellerMaxMs) totals.labellerMaxMs = durMs;
     return result;
   } catch (err) {
-    stats.labellerErrors++;
-    stats.labellerTotalMs += Date.now() - startedAt;
-    console.error(`[labeller-call] ${label} failed after ${Date.now() - startedAt}ms`, err);
+    const durMs = Date.now() - startedAt;
+    bump("labellerErrors");
+    bump("labellerTotalMs", durMs);
+    if (durMs > stats.labellerMaxMs) stats.labellerMaxMs = durMs;
+    if (durMs > totals.labellerMaxMs) totals.labellerMaxMs = durMs;
+    console.error(`[labeller-call] ${label} failed after ${durMs}ms`, err);
     throw err;
   }
 };
@@ -78,14 +98,14 @@ async function connect() {
     const did = event.did;
     const uri = `at://${did}/app.bsky.feed.post/${event.commit.rkey}`;
     const record = event.commit.record;
-    stats.posts++;
-    if (record.reply) stats.replies++;
+    bump("posts");
+    if (record.reply) bump("replies");
 
     try {
       await redis.set(`post:${uri}`, claimedRoot(uri, record), { EX: postCacheTtlSeconds });
 
       if (await isFuckedUpReply(record, redis)) {
-        stats.matched++;
+        bump("matched");
         console.log(`[match] fucked-up-replyref uri=${uri} did=${did}`);
         await Promise.all([
           timeLabellerCall("createLabels", () =>
@@ -102,11 +122,11 @@ async function connect() {
             }),
           ),
         ]);
-        stats.labelled++;
+        bump("labelled");
         console.log(`[labelled] ${uri}`);
       }
     } catch (err) {
-      stats.errors++;
+      bump("errors");
       console.error(`failed to process ${uri}`, err);
     }
   });

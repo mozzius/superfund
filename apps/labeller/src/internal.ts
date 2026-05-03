@@ -1,6 +1,6 @@
 import type { LabelerServer } from "@skyware/labeler";
 import Fastify, { type FastifyInstance } from "fastify";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { routes, type SavedLabel } from "labeller-client";
 
 export function createInternalServer(
@@ -96,6 +96,40 @@ export function createInternalServer(
       ...(row.exp ? { exp: String(row.exp) } : {}),
     }));
     return { labels };
+  });
+
+  // One-off recovery endpoint for wiping out a run of bad labels. Takes a val,
+  // finds every (uri, val) pair whose latest row is still active, and negates
+  // each. Delete once used.
+  app.post("/negate-all-by-val", async (req) => {
+    const { val } = z.object({ val: z.string().min(1) }).parse(req.body);
+    const nowIso = new Date().toISOString();
+    const candidates = await labeler.db.execute({
+      sql: `
+        SELECT l.uri, l.cid
+        FROM labels l
+        WHERE l.val = ?
+          AND l.src = ?
+          AND l.id = (
+            SELECT MAX(id) FROM labels
+            WHERE src = l.src AND uri = l.uri AND val = l.val
+          )
+          AND (l.neg IS NULL OR l.neg = 0)
+          AND (l.exp IS NULL OR l.exp > ?)
+      `,
+      args: [val, labeler.did, nowIso],
+    });
+    let negated = 0;
+    for (const row of candidates.rows) {
+      await labeler.createLabel({
+        uri: String(row.uri),
+        cid: row.cid ? String(row.cid) : undefined,
+        val,
+        neg: true,
+      });
+      negated++;
+    }
+    return { val, scanned: candidates.rows.length, negated };
   });
 
   app.post(routes.upsertLabel.path, async (req) => {

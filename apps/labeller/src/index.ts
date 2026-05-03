@@ -49,3 +49,38 @@ internal.listen({ port: internalPort, host: "::" }, (error, address) => {
   }
   console.log(`labeller internal listening on ${address}`);
 });
+
+const fmtMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+const heartbeat = setInterval(async () => {
+  const mem = process.memoryUsage();
+  const connections = (labeler as unknown as {
+    connections: Map<string, Set<unknown>>;
+  }).connections;
+  const subs = connections.get("com.atproto.label.subscribeLabels")?.size ?? 0;
+  let maxLabelId = 0;
+  let labelCount = 0;
+  try {
+    const row = await labeler.db.execute({
+      sql: "SELECT MAX(id) AS maxId, COUNT(*) AS total FROM labels",
+      args: [],
+    });
+    maxLabelId = Number(row.rows[0]?.maxId ?? 0);
+    labelCount = Number(row.rows[0]?.total ?? 0);
+  } catch (err) {
+    console.error("[heartbeat] db query failed", err);
+  }
+  console.log(
+    `[heartbeat] rss=${fmtMB(mem.rss)} heapUsed=${fmtMB(mem.heapUsed)}/` +
+      `${fmtMB(mem.heapTotal)} ext=${fmtMB(mem.external)} subs=${subs} ` +
+      `labels=${labelCount} maxId=${maxLabelId} ` +
+      `uptimeSec=${Math.round(process.uptime())}`,
+  );
+}, 30_000);
+heartbeat.unref();
+
+process.on("uncaughtException", (err) => {
+  console.error("[fatal] uncaughtException", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[fatal] unhandledRejection", reason);
+});

@@ -18,14 +18,53 @@ const labeller = createLabellerClient({ url: labellerUrl, apiKey: internalApiKey
 const redis = await createRedis(redisUrl);
 const cursor = createCursorStore(redis);
 
-const stats = { posts: 0, replies: 0, matched: 0, labelled: 0, errors: 0 };
+const stats = {
+  posts: 0,
+  replies: 0,
+  matched: 0,
+  labelled: 0,
+  errors: 0,
+  labellerCalls: 0,
+  labellerErrors: 0,
+  labellerTotalMs: 0,
+};
+const fmtMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 const heartbeat = setInterval(() => {
+  const mem = process.memoryUsage();
+  const avgCallMs = stats.labellerCalls
+    ? Math.round(stats.labellerTotalMs / stats.labellerCalls)
+    : 0;
   console.log(
     `[stats] posts=${stats.posts} replies=${stats.replies} ` +
-      `matched=${stats.matched} labelled=${stats.labelled} errors=${stats.errors}`,
+      `matched=${stats.matched} labelled=${stats.labelled} errors=${stats.errors} ` +
+      `labellerCalls=${stats.labellerCalls} labellerErrors=${stats.labellerErrors} ` +
+      `avgCallMs=${avgCallMs} rss=${fmtMB(mem.rss)} heap=${fmtMB(mem.heapUsed)}/${fmtMB(mem.heapTotal)} ` +
+      `uptimeSec=${Math.round(process.uptime())}`,
   );
 }, 10_000);
 heartbeat.unref();
+
+const timeLabellerCall = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
+  const startedAt = Date.now();
+  stats.labellerCalls++;
+  try {
+    const result = await fn();
+    stats.labellerTotalMs += Date.now() - startedAt;
+    return result;
+  } catch (err) {
+    stats.labellerErrors++;
+    stats.labellerTotalMs += Date.now() - startedAt;
+    console.error(`[labeller-call] ${label} failed after ${Date.now() - startedAt}ms`, err);
+    throw err;
+  }
+};
+
+process.on("uncaughtException", (err) => {
+  console.error("[fatal] uncaughtException", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[fatal] unhandledRejection", reason);
+});
 
 async function connect() {
   const jetstream = new Jetstream({
@@ -49,15 +88,19 @@ async function connect() {
         stats.matched++;
         console.log(`[match] fucked-up-replyref uri=${uri} did=${did}`);
         await Promise.all([
-          labeller.createLabels({
-            subject: { uri, cid: event.commit.cid },
-            create: ["fucked-up-replyref"],
-          }),
-          labeller.upsertLabel({
-            subject: { uri: did },
-            val: "doesnt-know-how-replyrefs-work",
-            expiresInMs: accountLabelMs,
-          }),
+          timeLabellerCall("createLabels", () =>
+            labeller.createLabels({
+              subject: { uri, cid: event.commit.cid },
+              create: ["fucked-up-replyref"],
+            }),
+          ),
+          timeLabellerCall("upsertLabel", () =>
+            labeller.upsertLabel({
+              subject: { uri: did },
+              val: "doesnt-know-how-replyrefs-work",
+              expiresInMs: accountLabelMs,
+            }),
+          ),
         ]);
         stats.labelled++;
         console.log(`[labelled] ${uri}`);

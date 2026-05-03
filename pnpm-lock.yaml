@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   '@skyware/labeler@0.2.0':
-    hash: f149c1e1d75e068e7ac0edabb1895aea1d6a6126701d914ee17fcb268f56f946
+    hash: 73cdf97b27dd75fb992d3384b6b5e7f0b3a586ff57241652c24137e318fe2798
     path: patches/@skyware__labeler@0.2.0.patch
 
 importers:
@@ -36,7 +36,7 @@ importers:
     dependencies:
       '@skyware/labeler':
         specifier: ^0.2.0
-        version: 0.2.0(patch_hash=f149c1e1d75e068e7ac0edabb1895aea1d6a6126701d914ee17fcb268f56f946)
+        version: 0.2.0(patch_hash=73cdf97b27dd75fb992d3384b6b5e7f0b3a586ff57241652c24137e318fe2798)
       fastify:
         specifier: ^4.29.1
         version: 4.29.1
@@ -715,7 +715,7 @@ snapshots:
     transitivePeerDependencies:
       - react
 
-  '@skyware/labeler@0.2.0(patch_hash=f149c1e1d75e068e7ac0edabb1895aea1d6a6126701d914ee17fcb268f56f946)':
+  '@skyware/labeler@0.2.0(patch_hash=73cdf97b27dd75fb992d3384b6b5e7f0b3a586ff57241652c24137e318fe2798)':
     dependencies:
       '@atcute/bluesky': 1.0.15(@atcute/client@2.0.9)
       '@atcute/cbor': 1.0.7

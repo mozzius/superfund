@@ -1,8 +1,34 @@
 diff --git a/dist/LabelerServer.js b/dist/LabelerServer.js
-index 5e57c5912c17427740c987c8cc72030452588094..a0742339f17f99d377bfd5542daccd949151a34a 100644
+index 5e57c5912c17427740c987c8cc72030452588094..0e4f4d25ece70f2ab98e87f3193149521622d97e 100644
 --- a/dist/LabelerServer.js
 +++ b/dist/LabelerServer.js
-@@ -317,31 +317,40 @@ export class LabelerServer {
+@@ -301,14 +301,24 @@ export class LabelerServer {
+      * Handler for [com.atproto.label.subscribeLabels](https://github.com/bluesky-social/atproto/blob/main/lexicons/com/atproto/label/subscribeLabels.json).
+      */
+     subscribeLabelsHandler = async (ws, req) => {
++        const connId = Math.random().toString(36).slice(2, 8);
++        const ua = req.headers?.["user-agent"] ?? "-";
++        const ip = req.headers?.["x-forwarded-for"] ?? req.ip ?? "-";
++        const startedAt = Date.now();
++        console.log(`[sub ${connId}] open cursor=${req.query.cursor ?? "none"} ua=${ua} ip=${ip}`);
+         await this.dbInitLock;
+         const cursor = parseInt(req.query.cursor ?? "NaN", 10);
++        let replayed = 0;
++        let pages = 0;
+         if (!Number.isNaN(cursor)) {
+             const latest = await this.db.execute({
+                 sql: "SELECT MAX(id) AS id FROM labels",
+                 args: [],
+             });
+-            if (cursor > (Number(latest.rows[0]?.id) ?? 0)) {
++            const latestId = Number(latest.rows[0]?.id) ?? 0;
++            console.log(`[sub ${connId}] replay cursor=${cursor} latest=${latestId} pending=${Math.max(0, latestId - cursor)}`);
++            if (cursor > latestId) {
++                console.warn(`[sub ${connId}] future-cursor cursor=${cursor} latest=${latestId}`);
+                 const errorBytes = frameToBytes("error", {
+                     error: "FutureCursor",
+                     message: "Cursor is in the future",
+@@ -317,46 +327,74 @@ export class LabelerServer {
                  ws.terminate();
              }
              try {
@@ -38,7 +64,11 @@ index 5e57c5912c17427740c987c8cc72030452588094..a0742339f17f99d377bfd5542daccd94
 +                let fromId = cursor;
 +                // eslint-disable-next-line no-constant-condition
 +                while (true) {
-+                    if (ws.readyState !== ws.OPEN) break;
++                    if (ws.readyState !== ws.OPEN) {
++                        console.log(`[sub ${connId}] client closed mid-replay at fromId=${fromId} replayed=${replayed}`);
++                        break;
++                    }
++                    const pageStart = Date.now();
 +                    const page = await this.db.execute({
 +                        sql: `SELECT * FROM labels WHERE id > ? ORDER BY id ASC LIMIT ?`,
 +                        args: [fromId, REPLAY_PAGE_SIZE],
@@ -62,8 +92,41 @@ index 5e57c5912c17427740c987c8cc72030452588094..a0742339f17f99d377bfd5542daccd94
 +                        }, "#labels");
 +                        await sendFramed(bytes);
 +                        fromId = Number(seq);
++                        replayed++;
 +                    }
++                    pages++;
++                    const buffered = ws.bufferedAmount ?? 0;
++                    console.log(`[sub ${connId}] page=${pages} rows=${page.rows.length} replayed=${replayed} fromId=${fromId} pageMs=${Date.now() - pageStart} bufferedBytes=${buffered}`);
 +                    if (page.rows.length < REPLAY_PAGE_SIZE) break;
                  }
++                console.log(`[sub ${connId}] replay-done pages=${pages} replayed=${replayed} totalMs=${Date.now() - startedAt}`);
              }
              catch (e) {
+-                console.error(e);
++                console.error(`[sub ${connId}] replay-error replayed=${replayed} fromId-at-error=unknown`, e);
+                 const errorBytes = frameToBytes("error", {
+                     error: "InternalServerError",
+                     message: "An unknown error occurred",
+                 });
+-                ws.send(errorBytes);
++                try {
++                    ws.send(errorBytes);
++                }
++                catch {}
+                 ws.terminate();
+             }
+         }
+         this.addSubscription("com.atproto.label.subscribeLabels", ws);
+-        ws.on("close", () => {
++        const liveCount = this.connections.get("com.atproto.label.subscribeLabels")?.size ?? 0;
++        console.log(`[sub ${connId}] subscribed live=${liveCount}`);
++        ws.on("close", (code, reason) => {
+             this.removeSubscription("com.atproto.label.subscribeLabels", ws);
++            const liveAfter = this.connections.get("com.atproto.label.subscribeLabels")?.size ?? 0;
++            console.log(`[sub ${connId}] close code=${code} reason=${reason?.toString?.() ?? "-"} durationMs=${Date.now() - startedAt} live=${liveAfter}`);
++        });
++        ws.on("error", (err) => {
++            console.error(`[sub ${connId}] ws error`, err);
+         });
+     };
+     /**

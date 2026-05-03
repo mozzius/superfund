@@ -11,11 +11,26 @@ export function createInternalServer(
 
   app.addHook("onRequest", async (req, reply) => {
     if (req.headers.authorization !== `Bearer ${apiKey}`) {
-      console.warn(`[internal] 401 ${req.method} ${req.url}`);
+      console.warn(
+        `[internal] 401 ${req.method} ${req.url} ip=${req.ip} ua=${req.headers["user-agent"] ?? "-"}`,
+      );
       reply.code(401).send({ error: "unauthorized" });
       return;
     }
-    console.log(`[internal] ${req.method} ${req.url}`);
+    (req as unknown as { _startedAt: number })._startedAt = Date.now();
+    console.log(`[internal] -> ${req.method} ${req.url}`);
+  });
+
+  app.addHook("onResponse", async (req, reply) => {
+    const startedAt = (req as unknown as { _startedAt?: number })._startedAt;
+    const durMs = startedAt ? Date.now() - startedAt : -1;
+    console.log(
+      `[internal] <- ${req.method} ${req.url} status=${reply.statusCode} durMs=${durMs}`,
+    );
+  });
+
+  app.addHook("onError", async (req, _reply, err) => {
+    console.error(`[internal] !! ${req.method} ${req.url}`, err);
   });
 
   app.setErrorHandler((err, _req, reply) => {

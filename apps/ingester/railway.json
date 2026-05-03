@@ -3,9 +3,9 @@
   "build": {
     "builder": "NIXPACKS",
     "watchPatterns": [
-      "apps/ingester/**",
-      "packages/labeller-client/**",
-      "pnpm-lock.yaml"
+      "/apps/ingester/**",
+      "/packages/labeller-client/**",
+      "/pnpm-lock.yaml"
     ]
   },
   "deploy": {

@@ -1,0 +1,14 @@
+diff --git a/dist/LabelerServer.js b/dist/LabelerServer.js
+index 5e57c5912c17427740c987c8cc72030452588094..0def112b3797611f9847bf9f896da009d16e3cfb 100644
+--- a/dist/LabelerServer.js
++++ b/dist/LabelerServer.js
+@@ -56,7 +56,8 @@ export class LabelerServer {
+         }
+         this.dbInitLock = this.initializeDatabase();
+         this.app = fastify();
+-        void this.app.register(fastifyWebsocket).then(() => {
++        this.app.register(fastifyWebsocket);
++        this.app.after(() => {
+             this.app.get("/xrpc/com.atproto.label.queryLabels", this.queryLabelsHandler);
+             this.app.post("/xrpc/tools.ozone.moderation.emitEvent", this.emitEventHandler);
+             this.app.get("/xrpc/com.atproto.label.subscribeLabels", { websocket: true }, this.subscribeLabelsHandler);

@@ -33,7 +33,6 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  */
 
 const labeler = new LabelerServer({ did, signingKey, dbPath });
-await labeler.app.ready();
 labeler.start({ port: publicPort, host: "::" }, (error, address) => {
   if (error) {
     console.error("labeller public server failed to start", error);

@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@skyware/labeler@0.2.0':
+    hash: fc2c1392da87cd7f2173a34c5f084442f47f9fb225dc62a65a543512a5a2914d
+    path: patches/@skyware__labeler@0.2.0.patch
+
 importers:
 
   .: {}
@@ -31,7 +36,7 @@ importers:
     dependencies:
       '@skyware/labeler':
         specifier: ^0.2.0
-        version: 0.2.0
+        version: 0.2.0(patch_hash=fc2c1392da87cd7f2173a34c5f084442f47f9fb225dc62a65a543512a5a2914d)
       fastify:
         specifier: ^4.29.1
         version: 4.29.1
@@ -710,7 +715,7 @@ snapshots:
     transitivePeerDependencies:
       - react
 
-  '@skyware/labeler@0.2.0':
+  '@skyware/labeler@0.2.0(patch_hash=fc2c1392da87cd7f2173a34c5f084442f47f9fb225dc62a65a543512a5a2914d)':
     dependencies:
       '@atcute/bluesky': 1.0.15(@atcute/client@2.0.9)
       '@atcute/cbor': 1.0.7

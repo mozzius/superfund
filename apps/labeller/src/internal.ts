@@ -1,6 +1,6 @@
 import type { LabelerServer } from "@skyware/labeler";
 import Fastify, { type FastifyInstance } from "fastify";
-import { z, ZodError } from "zod";
+import { ZodError } from "zod";
 import { routes, type SavedLabel } from "labeller-client";
 
 export function createInternalServer(
@@ -96,32 +96,6 @@ export function createInternalServer(
       ...(row.exp ? { exp: String(row.exp) } : {}),
     }));
     return { labels };
-  });
-
-  // One-off recovery endpoint for wiping out a run of bad labels. Drops every
-  // row from the labels table — intended for when a bug produced labels at
-  // such scale that negating is impractical. Active subscribers with a cursor
-  // above 0 will get FutureCursor errors and reconnect from scratch.
-  // Delete once used.
-  app.post("/truncate-labels", async () => {
-    const before = await labeler.db.execute({
-      sql: "SELECT COUNT(*) AS n, MAX(id) AS maxId FROM labels",
-      args: [],
-    });
-    const countBefore = Number(before.rows[0]?.n ?? 0);
-    const maxIdBefore = Number(before.rows[0]?.maxId ?? 0);
-    console.warn(
-      `[truncate] starting — will delete ${countBefore} rows (maxId=${maxIdBefore})`,
-    );
-    await labeler.db.execute({ sql: "DELETE FROM labels", args: [] });
-    await labeler.db.execute({ sql: "VACUUM", args: [] });
-    const after = await labeler.db.execute({
-      sql: "SELECT COUNT(*) AS n FROM labels",
-      args: [],
-    });
-    const countAfter = Number(after.rows[0]?.n ?? 0);
-    console.warn(`[truncate] done — rows now ${countAfter}`);
-    return { deleted: countBefore - countAfter, remaining: countAfter };
   });
 
   app.post(routes.upsertLabel.path, async (req) => {

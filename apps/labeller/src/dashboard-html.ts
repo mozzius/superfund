@@ -155,15 +155,32 @@ export const dashboardHtml = html`<!doctype html>
   const bskyProfileUrl = (did, handle) =>
     "https://bsky.app/profile/" + (handle ?? did);
 
+  // Sentinel returned when getProfile says the account is gone (suspended /
+  // deactivated / taken down) — we hide these entries entirely.
+  const HIDDEN = Symbol("hidden");
+  const HIDDEN_ERRORS = new Set([
+    "AccountTakedown",
+    "AccountDeactivated",
+    "AccountSuspended",
+  ]);
+
   async function resolveHandles(dids) {
     const entries = await Promise.all(dids.map(async (did) => {
       try {
         const res = await fetch(
           "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=" + encodeURIComponent(did)
         );
-        if (!res.ok) return [did, null];
-        const json = await res.json();
-        return [did, json.handle ?? null];
+        if (res.ok) {
+          const json = await res.json();
+          return [did, json.handle ?? null];
+        }
+        // Try to read the XRPC error body to distinguish gone-forever from
+        // transient failures.
+        try {
+          const json = await res.json();
+          if (json && HIDDEN_ERRORS.has(json.error)) return [did, HIDDEN];
+        } catch {}
+        return [did, null];
       } catch {
         return [did, null];
       }
@@ -195,8 +212,21 @@ export const dashboardHtml = html`<!doctype html>
   };
 
   const render = () => {
-    const accounts = sortAccounts(currentAccounts, currentSort);
     const handles = currentHandles;
+    const visibleAccounts = currentAccounts.filter((acc) => handles[acc.did] !== HIDDEN);
+    const hiddenCount = currentAccounts.length - visibleAccounts.length;
+    const accounts = sortAccounts(visibleAccounts, currentSort);
+
+    summaryEl.textContent =
+      visibleAccounts.length + " labelled account" + (visibleAccounts.length === 1 ? "" : "s") +
+      (hiddenCount ? " (" + hiddenCount + " hidden: suspended or deactivated)" : "");
+
+    if (!accounts.length) {
+      controlsEl.hidden = true;
+      listEl.innerHTML = '<div class="empty">no labelled accounts right now</div>';
+      return;
+    }
+    controlsEl.hidden = false;
 
     listEl.innerHTML = accounts.map((acc) => {
       const handle = handles[acc.did];
@@ -257,19 +287,10 @@ export const dashboardHtml = html`<!doctype html>
       const data = await res.json();
       const accounts = data.accounts ?? [];
 
-      if (!accounts.length) {
-        summaryEl.textContent = "";
-        controlsEl.hidden = true;
-        listEl.innerHTML = '<div class="empty">no labelled accounts right now</div>';
-        return;
-      }
-
-      summaryEl.textContent =
-        accounts.length + " labelled account" + (accounts.length === 1 ? "" : "s");
-
       currentAccounts = accounts;
-      currentHandles = await resolveHandles(accounts.map((a) => a.did));
-      controlsEl.hidden = false;
+      currentHandles = accounts.length
+        ? await resolveHandles(accounts.map((a) => a.did))
+        : {};
       render();
     } catch (err) {
       summaryEl.innerHTML = '<span class="err">failed to load: ' + esc(String(err)) + '</span>';

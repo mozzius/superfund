@@ -76,6 +76,41 @@ export const dashboardHtml = html`<!doctype html>
   .no-posts { color: var(--muted); font-size: 12px; font-style: italic; }
   .err { color: var(--accent); }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  .controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin: 16px 0;
+    font-size: 13px;
+  }
+  .controls .label { color: var(--muted); }
+  .controls button {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .controls button[aria-pressed="true"] {
+    background: var(--link);
+    border-color: var(--link);
+    color: #fff;
+  }
+  details.more { margin-top: 4px; }
+  details.more > summary {
+    cursor: pointer;
+    color: var(--link);
+    font-size: 12px;
+    list-style: none;
+    padding: 4px 0;
+    user-select: none;
+  }
+  details.more > summary::-webkit-details-marker { display: none; }
+  details.more > summary:hover { text-decoration: underline; }
+  details.more[open] > summary::after { content: " (hide)"; color: var(--muted); }
+  details.more > .posts { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -85,11 +120,21 @@ export const dashboardHtml = html`<!doctype html>
     <div class="sub">accounts carrying <code>doesnt-know-how-replyrefs-work</code> and the posts that tripped them</div>
   </header>
   <div id="summary" class="summary">loading…</div>
+  <div id="controls" class="controls" hidden>
+    <span class="label">sort by</span>
+    <button type="button" data-sort="latest" aria-pressed="true">latest</button>
+    <button type="button" data-sort="most" aria-pressed="false">most posts</button>
+  </div>
   <div id="list"></div>
 </main>
 <script>
   const listEl = document.getElementById("list");
   const summaryEl = document.getElementById("summary");
+  const controlsEl = document.getElementById("controls");
+  const POSTS_BEFORE_COLLAPSE = 5;
+  let currentAccounts = [];
+  let currentHandles = {};
+  let currentSort = "latest";
 
   const esc = (s) => s.replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -126,6 +171,85 @@ export const dashboardHtml = html`<!doctype html>
     return Object.fromEntries(entries);
   }
 
+  const renderPost = (p, handle) => {
+    const url = bskyPostUrl(p.uri, handle);
+    const link = url
+      ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">open</a>'
+      : '';
+    return '<div class="post"><span>' + esc(p.uri) + '</span>' +
+      '<span class="meta">' + esc(fmtDate(p.labelledAt)) +
+      (link ? ' &middot; ' + link : '') + '</span></div>';
+  };
+
+  const sortAccounts = (accounts, sort) => {
+    const copy = accounts.slice();
+    if (sort === "most") {
+      copy.sort((a, b) => {
+        if (b.posts.length !== a.posts.length) return b.posts.length - a.posts.length;
+        return a.labelledAt < b.labelledAt ? 1 : -1;
+      });
+    } else {
+      copy.sort((a, b) => (a.labelledAt < b.labelledAt ? 1 : -1));
+    }
+    return copy;
+  };
+
+  const render = () => {
+    const accounts = sortAccounts(currentAccounts, currentSort);
+    const handles = currentHandles;
+
+    listEl.innerHTML = accounts.map((acc) => {
+      const handle = handles[acc.did];
+      const header = handle
+        ? '<a class="handle" href="' + esc(bskyProfileUrl(acc.did, handle)) +
+          '" target="_blank" rel="noopener">@' + esc(handle) + '</a>' +
+          ' <span class="did">' + esc(acc.did) + '</span>'
+        : '<span class="did">' + esc(acc.did) + '</span>';
+
+      let postsHtml;
+      if (!acc.posts.length) {
+        postsHtml = '<div class="no-posts">no currently-labelled posts (may have expired or been negated)</div>';
+      } else if (acc.posts.length <= POSTS_BEFORE_COLLAPSE) {
+        postsHtml = '<div class="posts">' +
+          acc.posts.map((p) => renderPost(p, handle)).join("") +
+          '</div>';
+      } else {
+        const visible = acc.posts.slice(0, POSTS_BEFORE_COLLAPSE);
+        const rest = acc.posts.slice(POSTS_BEFORE_COLLAPSE);
+        postsHtml = '<div class="posts">' +
+          visible.map((p) => renderPost(p, handle)).join("") +
+          '</div>' +
+          '<details class="more"><summary>show ' + rest.length + ' more</summary>' +
+          '<div class="posts">' +
+          rest.map((p) => renderPost(p, handle)).join("") +
+          '</div></details>';
+      }
+
+      return '<div class="account">' +
+        '<div class="account-head">' +
+          '<div>' + header + '</div>' +
+          '<div class="meta">' + acc.posts.length + ' post' + (acc.posts.length === 1 ? '' : 's') +
+            ' &middot; labelled ' + esc(fmtDate(acc.labelledAt)) +
+            (acc.expiresAt ? ' &middot; expires ' + esc(fmtDate(acc.expiresAt)) : '') +
+          '</div>' +
+        '</div>' +
+        postsHtml +
+      '</div>';
+    }).join("");
+  };
+
+  controlsEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-sort]");
+    if (!btn) return;
+    const sort = btn.dataset.sort;
+    if (sort === currentSort) return;
+    currentSort = sort;
+    for (const b of controlsEl.querySelectorAll("button[data-sort]")) {
+      b.setAttribute("aria-pressed", b.dataset.sort === sort ? "true" : "false");
+    }
+    render();
+  });
+
   async function load() {
     try {
       const res = await fetch("/dashboard/data");
@@ -135,6 +259,7 @@ export const dashboardHtml = html`<!doctype html>
 
       if (!accounts.length) {
         summaryEl.textContent = "";
+        controlsEl.hidden = true;
         listEl.innerHTML = '<div class="empty">no labelled accounts right now</div>';
         return;
       }
@@ -142,38 +267,10 @@ export const dashboardHtml = html`<!doctype html>
       summaryEl.textContent =
         accounts.length + " labelled account" + (accounts.length === 1 ? "" : "s");
 
-      const handles = await resolveHandles(accounts.map((a) => a.did));
-
-      listEl.innerHTML = accounts.map((acc) => {
-        const handle = handles[acc.did];
-        const header = handle
-          ? '<a class="handle" href="' + esc(bskyProfileUrl(acc.did, handle)) +
-            '" target="_blank" rel="noopener">@' + esc(handle) + '</a>' +
-            ' <span class="did">' + esc(acc.did) + '</span>'
-          : '<span class="did">' + esc(acc.did) + '</span>';
-
-        const posts = acc.posts.length
-          ? acc.posts.map((p) => {
-              const url = bskyPostUrl(p.uri, handle);
-              const link = url
-                ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">open</a>'
-                : '';
-              return '<div class="post"><span>' + esc(p.uri) + '</span>' +
-                '<span class="meta">' + esc(fmtDate(p.labelledAt)) +
-                (link ? ' &middot; ' + link : '') + '</span></div>';
-            }).join("")
-          : '<div class="no-posts">no currently-labelled posts (may have expired or been negated)</div>';
-
-        return '<div class="account">' +
-          '<div class="account-head">' +
-            '<div>' + header + '</div>' +
-            '<div class="meta">labelled ' + esc(fmtDate(acc.labelledAt)) +
-              (acc.expiresAt ? ' &middot; expires ' + esc(fmtDate(acc.expiresAt)) : '') +
-            '</div>' +
-          '</div>' +
-          '<div class="posts">' + posts + '</div>' +
-        '</div>';
-      }).join("");
+      currentAccounts = accounts;
+      currentHandles = await resolveHandles(accounts.map((a) => a.did));
+      controlsEl.hidden = false;
+      render();
     } catch (err) {
       summaryEl.innerHTML = '<span class="err">failed to load: ' + esc(String(err)) + '</span>';
     }

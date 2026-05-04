@@ -102,7 +102,7 @@ export const dashboardHtml = html`<!doctype html>
 
   const bskyPostUrl = (uri, handle) => {
     // at://did:plc:xxx/app.bsky.feed.post/rkey
-    const m = uri.match(/^at:\\/\\/([^/]+)\\/app\\.bsky\\.feed\\.post\\/(.+)$/);
+    const m = uri.match(/^at:\/\/([^/]+)\/app\.bsky\.feed\.post\/(.+)$/);
     if (!m) return null;
     return "https://bsky.app/profile/" + (handle ?? m[1]) + "/post/" + m[2];
   };

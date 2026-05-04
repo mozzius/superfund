@@ -35,6 +35,15 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
 
 const labeler = new LabelerServer({ did, signingKey, dbPath });
 registerDashboardRoutes(labeler);
+
+labeler.app.ready((err) => {
+  if (err) {
+    console.error("[boot] labeler.app.ready rejected", err);
+  } else {
+    console.log("[boot] labeler.app.ready resolved");
+  }
+});
+
 labeler.start({ port: publicPort, host: "::" }, (error, address) => {
   if (error) {
     console.error("labeller public server failed to start", error);

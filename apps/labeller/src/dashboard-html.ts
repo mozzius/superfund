@@ -98,6 +98,8 @@ export const dashboardHtml = html`<!doctype html>
     border-color: var(--link);
     color: #fff;
   }
+  .controls .spacer { flex: 1; }
+  .controls .copy-status { color: var(--muted); font-size: 12px; }
   details.more { margin-top: 4px; }
   details.more > summary {
     cursor: pointer;
@@ -124,6 +126,9 @@ export const dashboardHtml = html`<!doctype html>
     <span class="label">sort by</span>
     <button type="button" data-sort="latest" aria-pressed="true">latest</button>
     <button type="button" data-sort="most" aria-pressed="false">most posts</button>
+    <span class="spacer"></span>
+    <span id="copy-status" class="copy-status" aria-live="polite"></span>
+    <button type="button" id="copy-profiles">copy profile urls</button>
   </div>
   <div id="list"></div>
 </main>
@@ -131,6 +136,8 @@ export const dashboardHtml = html`<!doctype html>
   const listEl = document.getElementById("list");
   const summaryEl = document.getElementById("summary");
   const controlsEl = document.getElementById("controls");
+  const copyBtn = document.getElementById("copy-profiles");
+  const copyStatusEl = document.getElementById("copy-status");
   const POSTS_BEFORE_COLLAPSE = 5;
   let currentAccounts = [];
   let currentHandles = {};
@@ -278,6 +285,33 @@ export const dashboardHtml = html`<!doctype html>
       b.setAttribute("aria-pressed", b.dataset.sort === sort ? "true" : "false");
     }
     render();
+  });
+
+  let copyStatusTimer;
+  const setCopyStatus = (msg) => {
+    copyStatusEl.textContent = msg;
+    clearTimeout(copyStatusTimer);
+    if (msg) copyStatusTimer = setTimeout(() => { copyStatusEl.textContent = ""; }, 2500);
+  };
+
+  copyBtn.addEventListener("click", async () => {
+    const urls = currentAccounts
+      .filter((acc) => currentHandles[acc.did] !== HIDDEN)
+      .map((acc) => {
+        const handle = currentHandles[acc.did];
+        return "https://bsky.app/profile/" + (handle ?? acc.did);
+      });
+    if (!urls.length) {
+      setCopyStatus("nothing to copy");
+      return;
+    }
+    const text = urls.join(String.fromCharCode(10));
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus("copied " + urls.length + " url" + (urls.length === 1 ? "" : "s"));
+    } catch {
+      setCopyStatus("copy failed");
+    }
   });
 
   async function load() {

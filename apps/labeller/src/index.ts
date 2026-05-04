@@ -34,15 +34,16 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  */
 
 const labeler = new LabelerServer({ did, signingKey, dbPath });
-registerDashboardRoutes(labeler);
 
-labeler.app.ready((err) => {
-  if (err) {
-    console.error("[boot] labeler.app.ready rejected", err);
-  } else {
-    console.log("[boot] labeler.app.ready resolved");
-  }
-});
+// Skyware's constructor schedules fastifyWebsocket + its own routes in a
+// `void register(...).then(...)` microtask, outside fastify's boot tracking.
+// Adding our routes to labeler.app synchronously after construction slots them
+// ahead of skyware's .then() in the boot queue in a way that deadlocks ready()
+// — listen() then never binds, with no error surfaced. Yielding a macrotask
+// first lets skyware's microtask flush so our routes land in a settled queue.
+await new Promise<void>((resolve) => setImmediate(resolve));
+
+registerDashboardRoutes(labeler);
 
 labeler.start({ port: publicPort, host: "::" }, (error, address) => {
   if (error) {

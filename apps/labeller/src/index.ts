@@ -96,3 +96,38 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason) => {
   console.error("[fatal] unhandledRejection", reason);
 });
+
+let shuttingDown = false;
+const shutdown = async (signal: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} — closing listeners`);
+  clearInterval(heartbeat);
+
+  const closeTimeout = 10_000;
+  const withTimeout = <T>(label: string, p: Promise<T>) =>
+    Promise.race([
+      p.then(() => console.log(`[shutdown] ${label} closed`)),
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          console.warn(`[shutdown] ${label} close timed out after ${closeTimeout}ms`);
+          resolve();
+        }, closeTimeout),
+      ),
+    ]);
+
+  await Promise.all([
+    withTimeout("public", labeler.app.close()),
+    withTimeout("internal", internal.close()),
+  ]);
+  try {
+    labeler.db.close();
+    console.log("[shutdown] db closed");
+  } catch (err) {
+    console.warn("[shutdown] db close failed", err);
+  }
+  console.log("[shutdown] bye");
+  process.exit(0);
+};
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

@@ -10,6 +10,7 @@
   },
   "deploy": {
     "startCommand": "pnpm -F labeller start",
-    "restartPolicyType": "ON_FAILURE"
+    "restartPolicyType": "ON_FAILURE",
+    "drainingSeconds": 15
   }
 }

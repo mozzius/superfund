@@ -126,6 +126,7 @@ export const dashboardHtml = html`<!doctype html>
     <span class="label">sort by</span>
     <button type="button" data-sort="latest" aria-pressed="true">latest</button>
     <button type="button" data-sort="most" aria-pressed="false">most posts</button>
+    <button type="button" id="toggle-bots" aria-pressed="false">hide bots</button>
     <span class="spacer"></span>
     <span id="copy-status" class="copy-status" aria-live="polite"></span>
     <button type="button" id="copy-profiles">copy profile urls</button>
@@ -141,7 +142,9 @@ export const dashboardHtml = html`<!doctype html>
   const POSTS_BEFORE_COLLAPSE = 5;
   let currentAccounts = [];
   let currentHandles = {};
+  let currentBots = new Set();
   let currentSort = "latest";
+  let hideBots = false;
 
   const esc = (s) => s.replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -171,28 +174,35 @@ export const dashboardHtml = html`<!doctype html>
     "AccountSuspended",
   ]);
 
-  async function resolveHandles(dids) {
-    const entries = await Promise.all(dids.map(async (did) => {
+  async function resolveProfiles(dids) {
+    const handles = {};
+    const bots = new Set();
+    await Promise.all(dids.map(async (did) => {
       try {
         const res = await fetch(
           "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=" + encodeURIComponent(did)
         );
         if (res.ok) {
           const json = await res.json();
-          return [did, json.handle ?? null];
+          handles[did] = json.handle ?? null;
+          if (Array.isArray(json.labels) && json.labels.some((l) => l.val === "!bot")) {
+            bots.add(did);
+          }
+          return;
         }
-        // Try to read the XRPC error body to distinguish gone-forever from
-        // transient failures.
         try {
           const json = await res.json();
-          if (json && HIDDEN_ERRORS.has(json.error)) return [did, HIDDEN];
+          if (json && HIDDEN_ERRORS.has(json.error)) {
+            handles[did] = HIDDEN;
+            return;
+          }
         } catch {}
-        return [did, null];
+        handles[did] = null;
       } catch {
-        return [did, null];
+        handles[did] = null;
       }
     }));
-    return Object.fromEntries(entries);
+    return { handles, bots };
   }
 
   const renderPost = (p, handle) => {
@@ -220,13 +230,21 @@ export const dashboardHtml = html`<!doctype html>
 
   const render = () => {
     const handles = currentHandles;
-    const visibleAccounts = currentAccounts.filter((acc) => handles[acc.did] !== HIDDEN);
-    const hiddenCount = currentAccounts.length - visibleAccounts.length;
+    const notGone = currentAccounts.filter((acc) => handles[acc.did] !== HIDDEN);
+    const goneCount = currentAccounts.length - notGone.length;
+    const visibleAccounts = hideBots
+      ? notGone.filter((acc) => !currentBots.has(acc.did))
+      : notGone;
+    const botHiddenCount = notGone.length - visibleAccounts.length;
     const accounts = sortAccounts(visibleAccounts, currentSort);
 
-    summaryEl.textContent =
-      visibleAccounts.length + " labelled account" + (visibleAccounts.length === 1 ? "" : "s") +
-      (hiddenCount ? " (" + hiddenCount + " hidden: suspended or deactivated)" : "");
+    const summaryParts = [];
+    summaryParts.push(visibleAccounts.length + " labelled account" + (visibleAccounts.length === 1 ? "" : "s"));
+    const detail = [];
+    if (goneCount) detail.push(goneCount + " suspended/deactivated");
+    if (botHiddenCount) detail.push(botHiddenCount + " bots");
+    if (detail.length) summaryParts.push("(" + detail.join(", ") + " hidden)");
+    summaryEl.textContent = summaryParts.join(" ");
 
     if (!accounts.length) {
       controlsEl.hidden = true;
@@ -276,15 +294,23 @@ export const dashboardHtml = html`<!doctype html>
   };
 
   controlsEl.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-sort]");
-    if (!btn) return;
-    const sort = btn.dataset.sort;
-    if (sort === currentSort) return;
-    currentSort = sort;
-    for (const b of controlsEl.querySelectorAll("button[data-sort]")) {
-      b.setAttribute("aria-pressed", b.dataset.sort === sort ? "true" : "false");
+    const sortBtn = e.target.closest("button[data-sort]");
+    if (sortBtn) {
+      const sort = sortBtn.dataset.sort;
+      if (sort === currentSort) return;
+      currentSort = sort;
+      for (const b of controlsEl.querySelectorAll("button[data-sort]")) {
+        b.setAttribute("aria-pressed", b.dataset.sort === sort ? "true" : "false");
+      }
+      render();
+      return;
     }
-    render();
+    if (e.target.closest("#toggle-bots")) {
+      hideBots = !hideBots;
+      const btn = document.getElementById("toggle-bots");
+      btn.setAttribute("aria-pressed", hideBots ? "true" : "false");
+      render();
+    }
   });
 
   let copyStatusTimer;
@@ -297,6 +323,7 @@ export const dashboardHtml = html`<!doctype html>
   copyBtn.addEventListener("click", async () => {
     const urls = currentAccounts
       .filter((acc) => currentHandles[acc.did] !== HIDDEN)
+      .filter((acc) => !hideBots || !currentBots.has(acc.did))
       .map((acc) => {
         const handle = currentHandles[acc.did];
         return "https://bsky.app/profile/" + (handle ?? acc.did);
@@ -322,9 +349,14 @@ export const dashboardHtml = html`<!doctype html>
       const accounts = data.accounts ?? [];
 
       currentAccounts = accounts;
-      currentHandles = accounts.length
-        ? await resolveHandles(accounts.map((a) => a.did))
-        : {};
+      if (accounts.length) {
+        const { handles, bots } = await resolveProfiles(accounts.map((a) => a.did));
+        currentHandles = handles;
+        currentBots = bots;
+      } else {
+        currentHandles = {};
+        currentBots = new Set();
+      }
       render();
     } catch (err) {
       summaryEl.innerHTML = '<span class="err">failed to load: ' + esc(String(err)) + '</span>';

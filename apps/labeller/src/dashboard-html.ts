@@ -185,7 +185,7 @@ export const dashboardHtml = html`<!doctype html>
         if (res.ok) {
           const json = await res.json();
           handles[did] = json.handle ?? null;
-          if (Array.isArray(json.labels) && json.labels.some((l) => l.val === "!bot")) {
+          if (Array.isArray(json.labels) && json.labels.some((l) => l.val === "bot")) {
             bots.add(did);
           }
           return;

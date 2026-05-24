@@ -63,7 +63,11 @@ internal.listen({ port: internalPort, host: "::" }, (error, address) => {
 });
 
 const fmtMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+let lastHeartbeatAt = Date.now();
+
 const heartbeat = setInterval(async () => {
+  lastHeartbeatAt = Date.now();
   const mem = process.memoryUsage();
   const connections = (labeler as unknown as {
     connections: Map<string, Set<unknown>>;
@@ -87,8 +91,23 @@ const heartbeat = setInterval(async () => {
       `labels=${labelCount} maxId=${maxLabelId} ` +
       `uptimeSec=${Math.round(process.uptime())}`,
   );
-}, 30_000);
+}, HEARTBEAT_INTERVAL_MS);
 heartbeat.unref();
+
+// Watchdog: if the heartbeat hasn't run in ~3 intervals the event loop is
+// likely stalled. Exit so Railway restarts us. Uses an unrefed interval at a
+// different cadence so a single missed tick doesn't fire it.
+const WATCHDOG_STALL_MS = HEARTBEAT_INTERVAL_MS * 3;
+const watchdog = setInterval(() => {
+  const sinceMs = Date.now() - lastHeartbeatAt;
+  if (sinceMs > WATCHDOG_STALL_MS) {
+    console.error(
+      `[watchdog] heartbeat stalled for ${Math.round(sinceMs / 1000)}s — exiting`,
+    );
+    process.exit(1);
+  }
+}, HEARTBEAT_INTERVAL_MS);
+watchdog.unref();
 
 process.on("uncaughtException", (err) => {
   console.error("[fatal] uncaughtException", err);

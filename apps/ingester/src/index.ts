@@ -86,6 +86,13 @@ process.on("unhandledRejection", (reason) => {
   console.error("[fatal] unhandledRejection", reason);
 });
 
+// Watchdog: jetstream sometimes goes silent without firing 'close', leaving
+// the WS half-open and the process stuck at 0 events. If we haven't seen a
+// post in WATCHDOG_STALL_MS, force-close so the existing reconnect path runs.
+const WATCHDOG_STALL_MS = 60_000;
+const WATCHDOG_INTERVAL_MS = 15_000;
+let lastEventAt = Date.now();
+
 async function connect() {
   const jetstream = new Jetstream({
     wantedCollections: ["app.bsky.feed.post"],
@@ -93,7 +100,33 @@ async function connect() {
     cursor: await cursor.load(),
   });
 
+  lastEventAt = Date.now();
+  let reconnectScheduled = false;
+  const scheduleReconnect = (reason: string) => {
+    if (reconnectScheduled) return;
+    reconnectScheduled = true;
+    clearInterval(watchdog);
+    console.warn(`[ingester] reconnecting (${reason})`);
+    setTimeout(() => void connect(), 3000);
+  };
+  const watchdog = setInterval(() => {
+    const sinceMs = Date.now() - lastEventAt;
+    if (sinceMs > WATCHDOG_STALL_MS) {
+      console.warn(
+        `[watchdog] no jetstream events for ${Math.round(sinceMs / 1000)}s, forcing reconnect`,
+      );
+      try {
+        jetstream.close();
+      } catch (err) {
+        console.error("[watchdog] close failed", err);
+      }
+      scheduleReconnect("watchdog stall");
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  watchdog.unref();
+
   jetstream.onCreate("app.bsky.feed.post", async (event) => {
+    lastEventAt = Date.now();
     cursor.update(event.time_us);
     const did = event.did;
     const uri = `at://${did}/app.bsky.feed.post/${event.commit.rkey}`;
@@ -132,10 +165,7 @@ async function connect() {
   });
 
   jetstream.on("open", () => console.log("jetstream connected"));
-  jetstream.on("close", () => {
-    console.warn("jetstream closed, reconnecting in 3s");
-    setTimeout(() => void connect(), 3000);
-  });
+  jetstream.on("close", () => scheduleReconnect("jetstream closed"));
   jetstream.on("error", (err) => console.error("jetstream error", err));
 
   jetstream.start();

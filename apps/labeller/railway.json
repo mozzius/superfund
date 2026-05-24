@@ -11,6 +11,8 @@
   "deploy": {
     "startCommand": "pnpm -F labeller start",
     "restartPolicyType": "ON_FAILURE",
-    "drainingSeconds": 15
+    "drainingSeconds": 15,
+    "healthcheckPath": "/xrpc/_health",
+    "healthcheckTimeout": 30
   }
 }

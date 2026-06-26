@@ -51,6 +51,7 @@ export function registerDashboardRoutes(server: LabelerServer) {
         WHERE (l.neg IS NULL OR l.neg = 0)
           AND (l.exp IS NULL OR l.exp > ?)
         ORDER BY l.cts DESC
+        LIMIT 500
       `,
       args: [ACCOUNT_LABEL, POST_LABEL, nowIso],
     });

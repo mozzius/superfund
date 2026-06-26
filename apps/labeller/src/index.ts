@@ -11,6 +11,9 @@ if (!did || !signingKey) {
 if (!internalApiKey) {
   throw new Error("INTERNAL_API_KEY must be set");
 }
+if (!/^did:[a-z]+:[a-zA-Z0-9._:%-]+$/.test(did)) {
+  throw new Error(`LABELER_DID does not look like a valid DID: ${did}`);
+}
 
 const volumePath = process.env.RAILWAY_VOLUME_MOUNT_PATH;
 const dbPath = volumePath ? `${volumePath}/labels.db` : "./labels.db";

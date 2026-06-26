@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "pnpm -F labeller dev",
     "start": "pnpm -F labeller start",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
   }
 }

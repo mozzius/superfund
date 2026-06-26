@@ -20,6 +20,7 @@ export function createLabellerClient(opts: LabellerClientOptions) {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${opts.apiKey}`,
+        "user-agent": "labeller-client/1.0",
       },
       body: JSON.stringify(input),
     });

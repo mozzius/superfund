@@ -24,6 +24,7 @@ const makeStats = () => ({
   matched: 0,
   labelled: 0,
   errors: 0,
+  skipped: 0,
   labellerCalls: 0,
   labellerErrors: 0,
   labellerTotalMs: 0,
@@ -44,6 +45,7 @@ const heartbeat = setInterval(() => {
   console.log(
     `[stats 10s] posts=${window.posts} (${postsPerSec}/s) replies=${window.replies} ` +
       `matched=${window.matched} labelled=${window.labelled} errors=${window.errors} ` +
+      `skipped=${window.skipped} ` +
       `labellerCalls=${window.labellerCalls} labellerErrors=${window.labellerErrors} ` +
       `avgCallMs=${avgCallMs} maxCallMs=${window.labellerMaxMs} ` +
       `rss=${fmtMB(mem.rss)} heap=${fmtMB(mem.heapUsed)}/${fmtMB(mem.heapTotal)} ` +
@@ -79,6 +81,20 @@ const timeLabellerCall = async <T>(label: string, fn: () => Promise<T>): Promise
   }
 };
 
+const RETRY_ATTEMPTS = 3;
+const withRetry = async <T>(fn: () => Promise<T>): Promise<T> => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= RETRY_ATTEMPTS) throw err;
+      const backoffMs = 1000 * 2 ** (attempt - 1);
+      console.warn(`[retry] attempt ${attempt}/${RETRY_ATTEMPTS} failed, retrying in ${backoffMs}ms`, err);
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
+};
+
 process.on("uncaughtException", (err) => {
   console.error("[fatal] uncaughtException", err);
 });
@@ -92,6 +108,12 @@ process.on("unhandledRejection", (reason) => {
 const WATCHDOG_STALL_MS = 60_000;
 const WATCHDOG_INTERVAL_MS = 15_000;
 let lastEventAt = Date.now();
+
+// Backpressure: @skyware/jetstream emits events synchronously via tiny-emitter
+// and does not await the async listener, so without a limit we'd have unbounded
+// concurrent processing. Cap in-flight events; excess events are dropped.
+const MAX_INFLIGHT = 100;
+let inFlight = 0;
 
 async function connect() {
   const jetstream = new Jetstream({
@@ -127,7 +149,15 @@ async function connect() {
 
   jetstream.onCreate("app.bsky.feed.post", async (event) => {
     lastEventAt = Date.now();
-    cursor.update(event.time_us);
+
+    if (inFlight >= MAX_INFLIGHT) {
+      bump("skipped");
+      console.warn(`[backpressure] inFlight=${inFlight}, skipping ${event.time_us}`);
+      cursor.update(event.time_us);
+      return;
+    }
+    inFlight++;
+
     const did = event.did;
     const uri = `at://${did}/app.bsky.feed.post/${event.commit.rkey}`;
     const record = event.commit.record;
@@ -142,17 +172,21 @@ async function connect() {
         console.log(`[match] fucked-up-replyref uri=${uri} did=${did}`);
         await Promise.all([
           timeLabellerCall("createLabels", () =>
-            labeller.createLabels({
-              subject: { uri, cid: event.commit.cid },
-              create: ["fucked-up-replyref"],
-            }),
+            withRetry(() =>
+              labeller.createLabels({
+                subject: { uri, cid: event.commit.cid },
+                create: ["fucked-up-replyref"],
+              }),
+            ),
           ),
           timeLabellerCall("upsertLabel", () =>
-            labeller.upsertLabel({
-              subject: { uri: did },
-              val: "doesnt-know-how-replyrefs-work",
-              expiresInMs: accountLabelMs,
-            }),
+            withRetry(() =>
+              labeller.upsertLabel({
+                subject: { uri: did },
+                val: "doesnt-know-how-replyrefs-work",
+                expiresInMs: accountLabelMs,
+              }),
+            ),
           ),
         ]);
         bump("labelled");
@@ -161,6 +195,11 @@ async function connect() {
     } catch (err) {
       bump("errors");
       console.error(`failed to process ${uri}`, err);
+    } finally {
+      inFlight--;
+      // Advance cursor only after processing (or failure), so a crash mid-event
+      // replays from the last committed cursor (at-least-once for crashes).
+      cursor.update(event.time_us);
     }
   });
 

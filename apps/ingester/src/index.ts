@@ -34,7 +34,9 @@ let stats = makeStats();
 const totals = makeStats();
 const fmtMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 const HEARTBEAT_MS = 10_000;
+let lastHeartbeatAt = Date.now();
 const heartbeat = setInterval(() => {
+  lastHeartbeatAt = Date.now();
   const window = stats;
   stats = makeStats();
   const mem = process.memoryUsage();
@@ -54,6 +56,21 @@ const heartbeat = setInterval(() => {
   );
 }, HEARTBEAT_MS);
 heartbeat.unref();
+
+// Watchdog: if the heartbeat hasn't run in ~3 intervals the event loop is
+// likely stalled (not just jetstream silence — a blocked loop would prevent
+// the stats interval from firing too). Exit so Railway restarts us.
+const STALL_THRESHOLD_MS = HEARTBEAT_MS * 3;
+const stallWatchdog = setInterval(() => {
+  const sinceMs = Date.now() - lastHeartbeatAt;
+  if (sinceMs > STALL_THRESHOLD_MS) {
+    console.error(
+      `[watchdog] heartbeat stalled for ${Math.round(sinceMs / 1000)}s — exiting`,
+    );
+    process.exit(1);
+  }
+}, HEARTBEAT_MS);
+stallWatchdog.unref();
 
 const bump = (key: keyof ReturnType<typeof makeStats>, by = 1) => {
   stats[key] += by;

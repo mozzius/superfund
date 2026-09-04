@@ -2,21 +2,78 @@ import { Jetstream } from "@skyware/jetstream";
 import { createLabellerClient } from "labeller-client";
 import { createRedis } from "./redis.ts";
 import { claimedRoot, isFuckedUpReply } from "./classify.ts";
-import { createCursorStore } from "./cursor.ts";
+import { CursorTracker } from "./cursor-tracker.ts";
+import { createPostStore } from "./post-store.ts";
 
 const labellerUrl = process.env.LABELLER_URL;
 const internalApiKey = process.env.INTERNAL_API_KEY;
 const redisUrl = process.env.REDIS_URL;
-if (!labellerUrl || !internalApiKey || !redisUrl) {
-  throw new Error("LABELLER_URL, INTERNAL_API_KEY, and REDIS_URL must be set");
+if (!labellerUrl || !internalApiKey) {
+  throw new Error("LABELLER_URL and INTERNAL_API_KEY must be set");
 }
 
 const postCacheTtlSeconds = Number(process.env.POST_CACHE_TTL_DAYS ?? 7) * 86_400;
 const accountLabelMs = 30 * 86_400 * 1000;
+const volumePath = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+const postStorePath =
+  process.env.POST_STORE_PATH ?? (volumePath ? `${volumePath}/posts.db` : "./posts.db");
 
 const labeller = createLabellerClient({ url: labellerUrl, apiKey: internalApiKey });
-const redis = await createRedis(redisUrl);
-const cursor = createCursorStore(redis);
+let legacyRedis: Awaited<ReturnType<typeof createRedis>> | undefined;
+if (redisUrl) {
+  try {
+    legacyRedis = await createRedis(redisUrl);
+  } catch (err) {
+    console.warn("legacy Redis unavailable; continuing with SQLite only", err);
+  }
+}
+const redisFallback = legacyRedis;
+let redisFallbackWarningLogged = false;
+const legacyGetClaimedRoot = redisFallback
+  ? async (uri: string): Promise<string | null> => {
+      if (!redisFallback.isReady) return null;
+      try {
+        const root = await redisFallback.get(`post:${uri}`);
+        redisFallbackWarningLogged = false;
+        return root;
+      } catch (err) {
+        if (!redisFallbackWarningLogged) {
+          console.warn("legacy Redis lookup failed; treating it as a cache miss", err);
+          redisFallbackWarningLogged = true;
+        }
+        return null;
+      }
+    }
+  : undefined;
+
+const posts = createPostStore({
+  dbPath: postStorePath,
+  ttlMs: postCacheTtlSeconds * 1000,
+  legacyGetClaimedRoot,
+});
+const cursor = new CursorTracker(posts);
+
+if (posts.loadCursor() === undefined && legacyRedis) {
+  try {
+    const rawCursor = legacyRedis.isReady
+      ? await legacyRedis.get("ingester:cursor")
+      : null;
+    const legacyCursor = Number(rawCursor);
+    if (rawCursor && Number.isFinite(legacyCursor)) {
+      posts.updateCursor(legacyCursor);
+      posts.flush();
+      console.log("migrated Jetstream cursor from Redis to SQLite");
+    }
+  } catch (err) {
+    console.warn(
+      "legacy Redis cursor migration failed; continuing with SQLite only",
+      err,
+    );
+  }
+}
+console.log(
+  `post store ready path=${postStorePath} legacyRedisFallback=${Boolean(legacyRedis)}`,
+);
 
 const makeStats = () => ({
   posts: 0,
@@ -136,7 +193,7 @@ async function connect() {
   const jetstream = new Jetstream({
     wantedCollections: ["app.bsky.feed.post"],
     endpoint: process.env.JETSTREAM_ENDPOINT,
-    cursor: await cursor.load(),
+    cursor: posts.loadCursor(),
   });
 
   lastEventAt = Date.now();
@@ -170,10 +227,11 @@ async function connect() {
     if (inFlight >= MAX_INFLIGHT) {
       bump("skipped");
       console.warn(`[backpressure] inFlight=${inFlight}, skipping ${event.time_us}`);
-      cursor.update(event.time_us);
+      cursor.skip(event.time_us);
       return;
     }
     inFlight++;
+    const completeCursor = cursor.begin(event.time_us);
 
     const did = event.did;
     const uri = `at://${did}/app.bsky.feed.post/${event.commit.rkey}`;
@@ -182,9 +240,9 @@ async function connect() {
     if (record.reply) bump("replies");
 
     try {
-      await redis.set(`post:${uri}`, claimedRoot(uri, record), { EX: postCacheTtlSeconds });
+      posts.setPost(uri, claimedRoot(uri, record));
 
-      if (await isFuckedUpReply(record, redis)) {
+      if (await isFuckedUpReply(record, posts)) {
         bump("matched");
         console.log(`[match] fucked-up-replyref uri=${uri} did=${did}`);
         await Promise.all([
@@ -214,9 +272,9 @@ async function connect() {
       console.error(`failed to process ${uri}`, err);
     } finally {
       inFlight--;
-      // Advance cursor only after processing (or failure), so a crash mid-event
-      // replays from the last committed cursor (at-least-once for crashes).
-      cursor.update(event.time_us);
+      // Advance only through the contiguous prefix of completed handlers so a
+      // crash cannot checkpoint past older work that is still in flight.
+      completeCursor();
     }
   });
 
@@ -228,8 +286,8 @@ async function connect() {
 }
 
 const shutdown = async () => {
-  await cursor.flush();
-  await redis.quit();
+  posts.close();
+  await legacyRedis?.quit();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);

@@ -1,7 +1,7 @@
 import { createClient } from "redis";
 
 export async function createRedis(url: string) {
-  const client = createClient({ url });
+  const client = createClient({ url, disableOfflineQueue: true });
   client.on("error", (err) => console.error("redis error", err));
 
   // Retry the initial connect — redis v5 auto-reconnects after the first

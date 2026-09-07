@@ -59,23 +59,21 @@ test("makes pending posts available before the next batch flush", async () => {
   store.close();
 });
 
-test("uses Redis as a read-only fallback and backfills SQLite", async () => {
-  let fallbackCalls = 0;
+test("rejects malformed posts before they can poison a batch", async () => {
   const store = createPostStore({
     dbPath: ":memory:",
     ttlMs: 60_000,
     flushIntervalMs: 0,
     cleanupIntervalMs: 0,
-    legacyGetClaimedRoot: async (uri) => {
-      fallbackCalls++;
-      return uri === "at://legacy" ? "at://root" : null;
-    },
   });
+  assert.throws(
+    () => store.setPost("at://bad", undefined as unknown as string),
+    /claimed root URI must be a non-empty string/,
+  );
 
-  assert.equal(await store.getClaimedRoot("at://legacy"), "at://root");
+  store.setPost("at://good", "at://root");
   store.flush();
-  assert.equal(await store.getClaimedRoot("at://legacy"), "at://root");
-  assert.equal(fallbackCalls, 1);
+  assert.equal(await store.getClaimedRoot("at://good"), "at://root");
   store.close();
 });
 

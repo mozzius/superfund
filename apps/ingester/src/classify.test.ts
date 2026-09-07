@@ -18,6 +18,13 @@ test("claimedRoot returns own URI for non-replies", () => {
   assert.equal(claimedRoot("at://did:plc:abc/post", {}), "at://did:plc:abc/post");
 });
 
+test("claimedRoot rejects a malformed reply root", () => {
+  assert.equal(
+    claimedRoot("at://did:plc:abc/post", { reply: { root: {} } }),
+    undefined,
+  );
+});
+
 test("isFuckedUpReply returns false for non-replies", async () => {
   assert.equal(await isFuckedUpReply({}, mockPosts(null)), false);
 });
@@ -35,4 +42,16 @@ test("isFuckedUpReply returns true when parent root mismatches", async () => {
 test("isFuckedUpReply returns false when parent root matches", async () => {
   const record = { reply: { parent: { uri: "at://parent" }, root: { uri: "at://root" } } };
   assert.equal(await isFuckedUpReply(record, mockPosts("at://root")), false);
+});
+
+test("isFuckedUpReply ignores malformed reply refs without querying the store", async () => {
+  const posts = {
+    getClaimedRoot: async () => {
+      assert.fail("the store should not be queried");
+    },
+  };
+  assert.equal(
+    await isFuckedUpReply({ reply: { parent: {}, root: {} } }, posts),
+    false,
+  );
 });

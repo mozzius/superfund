@@ -6,7 +6,6 @@ import { DatabaseSync } from "node:sqlite";
 export interface PostStoreOptions {
   dbPath: string;
   ttlMs: number;
-  legacyGetClaimedRoot?: (uri: string) => Promise<string | null>;
   flushIntervalMs?: number;
   cleanupIntervalMs?: number;
   now?: () => number;
@@ -33,7 +32,6 @@ const MAX_PENDING_POSTS = 1_000;
 export class PostStore {
   readonly #db: DatabaseSync;
   readonly #ttlMs: number;
-  readonly #legacyGetClaimedRoot?: (uri: string) => Promise<string | null>;
   readonly #now: () => number;
   readonly #pendingPosts = new Map<string, PendingPost>();
   readonly #selectPost;
@@ -51,7 +49,6 @@ export class PostStore {
     const {
       dbPath,
       ttlMs,
-      legacyGetClaimedRoot,
       flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MS,
       cleanupIntervalMs = DEFAULT_CLEANUP_INTERVAL_MS,
       now = Date.now,
@@ -63,7 +60,6 @@ export class PostStore {
     if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
     this.#db = new DatabaseSync(dbPath, { timeout: 5_000 });
     this.#ttlMs = ttlMs;
-    this.#legacyGetClaimedRoot = legacyGetClaimedRoot;
     this.#now = now;
 
     this.#db.exec(`
@@ -128,6 +124,8 @@ export class PostStore {
 
   setPost(uri: string, claimedRoot: string): void {
     this.#assertOpen();
+    assertValidUri(uri, "post URI");
+    assertValidUri(claimedRoot, "claimed root URI");
     this.#pendingPosts.set(uri, {
       claimedRoot,
       expiresAtMs: this.#now() + this.#ttlMs,
@@ -145,9 +143,7 @@ export class PostStore {
       | undefined;
     if (row) return row.claimed_root ?? uri;
 
-    const legacy = await this.#legacyGetClaimedRoot?.(uri);
-    if (legacy != null) this.setPost(uri, legacy);
-    return legacy ?? null;
+    return null;
   }
 
   loadCursor(): number | undefined {
@@ -227,5 +223,12 @@ export function createPostStore(options: PostStoreOptions): PostStore {
 }
 
 function hashUri(uri: string): Buffer {
+  assertValidUri(uri, "post URI");
   return createHash("sha256").update(uri).digest();
+}
+
+function assertValidUri(value: unknown, name: string): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
 }

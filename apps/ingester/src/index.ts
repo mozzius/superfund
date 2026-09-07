@@ -1,13 +1,11 @@
 import { Jetstream } from "@skyware/jetstream";
 import { createLabellerClient } from "labeller-client";
-import { createRedis } from "./redis.ts";
 import { claimedRoot, isFuckedUpReply } from "./classify.ts";
 import { CursorTracker } from "./cursor-tracker.ts";
 import { createPostStore } from "./post-store.ts";
 
 const labellerUrl = process.env.LABELLER_URL;
 const internalApiKey = process.env.INTERNAL_API_KEY;
-const redisUrl = process.env.REDIS_URL;
 if (!labellerUrl || !internalApiKey) {
   throw new Error("LABELLER_URL and INTERNAL_API_KEY must be set");
 }
@@ -19,61 +17,14 @@ const postStorePath =
   process.env.POST_STORE_PATH ?? (volumePath ? `${volumePath}/posts.db` : "./posts.db");
 
 const labeller = createLabellerClient({ url: labellerUrl, apiKey: internalApiKey });
-let legacyRedis: Awaited<ReturnType<typeof createRedis>> | undefined;
-if (redisUrl) {
-  try {
-    legacyRedis = await createRedis(redisUrl);
-  } catch (err) {
-    console.warn("legacy Redis unavailable; continuing with SQLite only", err);
-  }
-}
-const redisFallback = legacyRedis;
-let redisFallbackWarningLogged = false;
-const legacyGetClaimedRoot = redisFallback
-  ? async (uri: string): Promise<string | null> => {
-      if (!redisFallback.isReady) return null;
-      try {
-        const root = await redisFallback.get(`post:${uri}`);
-        redisFallbackWarningLogged = false;
-        return root;
-      } catch (err) {
-        if (!redisFallbackWarningLogged) {
-          console.warn("legacy Redis lookup failed; treating it as a cache miss", err);
-          redisFallbackWarningLogged = true;
-        }
-        return null;
-      }
-    }
-  : undefined;
 
 const posts = createPostStore({
   dbPath: postStorePath,
   ttlMs: postCacheTtlSeconds * 1000,
-  legacyGetClaimedRoot,
 });
 const cursor = new CursorTracker(posts);
 
-if (posts.loadCursor() === undefined && legacyRedis) {
-  try {
-    const rawCursor = legacyRedis.isReady
-      ? await legacyRedis.get("ingester:cursor")
-      : null;
-    const legacyCursor = Number(rawCursor);
-    if (rawCursor && Number.isFinite(legacyCursor)) {
-      posts.updateCursor(legacyCursor);
-      posts.flush();
-      console.log("migrated Jetstream cursor from Redis to SQLite");
-    }
-  } catch (err) {
-    console.warn(
-      "legacy Redis cursor migration failed; continuing with SQLite only",
-      err,
-    );
-  }
-}
-console.log(
-  `post store ready path=${postStorePath} legacyRedisFallback=${Boolean(legacyRedis)}`,
-);
+console.log(`post store ready path=${postStorePath}`);
 
 const makeStats = () => ({
   posts: 0,
@@ -226,7 +177,9 @@ async function connect() {
 
     if (inFlight >= MAX_INFLIGHT) {
       bump("skipped");
-      console.warn(`[backpressure] inFlight=${inFlight}, skipping ${event.time_us}`);
+      if (stats.skipped === 1) {
+        console.warn(`[backpressure] inFlight=${inFlight}, skipping events`);
+      }
       cursor.skip(event.time_us);
       return;
     }
@@ -240,7 +193,13 @@ async function connect() {
     if (record.reply) bump("replies");
 
     try {
-      posts.setPost(uri, claimedRoot(uri, record));
+      const root = claimedRoot(uri, record);
+      if (!root) {
+        bump("skipped");
+        console.warn(`[invalid-post] malformed reply refs uri=${uri}`);
+        return;
+      }
+      posts.setPost(uri, root);
 
       if (await isFuckedUpReply(record, posts)) {
         bump("matched");
@@ -287,7 +246,6 @@ async function connect() {
 
 const shutdown = async () => {
   posts.close();
-  await legacyRedis?.quit();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);

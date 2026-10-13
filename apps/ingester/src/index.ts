@@ -153,6 +153,14 @@ async function connect() {
     if (reconnectScheduled) return;
     reconnectScheduled = true;
     clearInterval(watchdog);
+    // The underlying partysocket auto-reconnects after an unexpected close, so
+    // without an explicit close() this instance would carry on alongside the
+    // new one — every past reconnect was leaking a live duplicate connection.
+    try {
+      jetstream.close();
+    } catch (err) {
+      console.error("[ingester] close failed", err);
+    }
     console.warn(`[ingester] reconnecting (${reason})`);
     setTimeout(() => void connect(), 3000);
   };
@@ -162,17 +170,14 @@ async function connect() {
       console.warn(
         `[watchdog] no jetstream events for ${Math.round(sinceMs / 1000)}s, forcing reconnect`,
       );
-      try {
-        jetstream.close();
-      } catch (err) {
-        console.error("[watchdog] close failed", err);
-      }
       scheduleReconnect("watchdog stall");
     }
   }, WATCHDOG_INTERVAL_MS);
   watchdog.unref();
 
   jetstream.onCreate("app.bsky.feed.post", async (event) => {
+    // Ignore anything still buffered on a connection we've retired.
+    if (reconnectScheduled) return;
     lastEventAt = Date.now();
 
     if (inFlight >= MAX_INFLIGHT) {

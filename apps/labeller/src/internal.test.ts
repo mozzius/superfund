@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildQueryLabelsSql } from "./internal.ts";
+import { buildQueryLabelsSql, shouldReissueLabel } from "./internal.ts";
 
 test("exact match (no wildcard) produces a LIKE with ESCAPE", () => {
   const result = buildQueryLabelsSql({ uriPatterns: ["at://did:plc:abc/app.bsky.feed.post/rkey"] });
@@ -72,4 +72,40 @@ test("backslash in input is escaped", () => {
   if ("sql" in result) {
     assert.deepEqual(result.args, ["at://a\\\\b"]);
   }
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = Date.parse("2026-10-13T12:00:00.000Z");
+const iso = (ms: number) => new Date(ms).toISOString();
+
+test("reissues when there is no existing label", () => {
+  assert.equal(shouldReissueLabel(undefined, NOW, 30 * DAY), true);
+});
+
+test("reissues when the latest label is a negation", () => {
+  assert.equal(shouldReissueLabel({ neg: 1, exp: null }, NOW, 30 * DAY), true);
+});
+
+test("reissues when the latest label has expired", () => {
+  assert.equal(shouldReissueLabel({ neg: 0, exp: iso(NOW - 1) }, NOW, 30 * DAY), true);
+});
+
+test("reissues a permanent label so it becomes expiring", () => {
+  assert.equal(shouldReissueLabel({ neg: 0, exp: null }, NOW, 30 * DAY), true);
+});
+
+test("skips an active label refreshed within the last day", () => {
+  const exp = iso(NOW + 30 * DAY - 2 * 60 * 60 * 1000);
+  assert.equal(shouldReissueLabel({ neg: 0, exp }, NOW, 30 * DAY), false);
+});
+
+test("reissues an active label last refreshed over a day ago", () => {
+  const exp = iso(NOW + 28 * DAY);
+  assert.equal(shouldReissueLabel({ neg: 0, exp }, NOW, 30 * DAY), true);
+});
+
+test("short expiries refresh at half their length", () => {
+  const hour = 60 * 60 * 1000;
+  assert.equal(shouldReissueLabel({ neg: 0, exp: iso(NOW + 4 * hour) }, NOW, 4 * hour), false);
+  assert.equal(shouldReissueLabel({ neg: 0, exp: iso(NOW + 1 * hour) }, NOW, 4 * hour), true);
 });

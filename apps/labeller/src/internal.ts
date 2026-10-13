@@ -55,6 +55,29 @@ export function buildQueryLabelsSql(
   };
 }
 
+/** Re-issue an active expiring label at most this often. */
+const UPSERT_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether upsertLabel should negate + re-create the label. Re-issuing on every
+ * call wrote two rows per matched post (one prolific account was doing
+ * thousands a day), so an active label is left alone unless pushing its
+ * expiry out would move it by more than UPSERT_REFRESH_MS.
+ */
+export function shouldReissueLabel(
+  latest: Record<string, unknown> | undefined,
+  nowMs: number,
+  expiresInMs: number,
+): boolean {
+  if (!latest || Number(latest.neg)) return true;
+  // Permanent label: convert it to an expiring one, as before.
+  if (!latest.exp) return true;
+  const expMs = Date.parse(String(latest.exp));
+  if (!(expMs > nowMs)) return true;
+  const refreshMs = Math.min(UPSERT_REFRESH_MS, expiresInMs / 2);
+  return nowMs + expiresInMs - expMs > refreshMs;
+}
+
 /** Per-key mutex to serialise concurrent upsertLabel calls (libsql uses a single connection). */
 const upsertLocks = new Map<string, Promise<unknown>>();
 function withUpsertLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -173,6 +196,10 @@ export function createInternalServer(
       });
       const latest = existing.rows[0];
       const emitted: SavedLabel[] = [];
+
+      if (!shouldReissueLabel(latest, nowMs, expiresInMs)) {
+        return { labels: emitted };
+      }
 
       const isActive =
         latest &&

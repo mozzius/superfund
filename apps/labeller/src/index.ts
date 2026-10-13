@@ -1,6 +1,7 @@
 import { LabelerServer } from "@skyware/labeler";
 import { createInternalServer } from "./internal.ts";
 import { registerDashboardRoutes } from "./dashboard.ts";
+import { ensureIndexes } from "./db.ts";
 
 const did = process.env.LABELER_DID;
 const signingKey = process.env.SIGNING_KEY;
@@ -46,6 +47,8 @@ const labeler = new LabelerServer({ did, signingKey, dbPath });
 // first lets skyware's microtask flush so our routes land in a settled queue.
 await new Promise<void>((resolve) => setImmediate(resolve));
 
+await ensureIndexes(labeler);
+
 registerDashboardRoutes(labeler);
 
 labeler.start({ port: publicPort, host: "::" }, (error, address) => {
@@ -77,21 +80,20 @@ const heartbeat = setInterval(async () => {
   }).connections;
   const subs = connections.get("com.atproto.label.subscribeLabels")?.size ?? 0;
   let maxLabelId = 0;
-  let labelCount = 0;
   try {
+    // No COUNT(*) here — it's a full scan, and this runs every 30s.
     const row = await labeler.db.execute({
-      sql: "SELECT MAX(id) AS maxId, COUNT(*) AS total FROM labels",
+      sql: "SELECT MAX(id) AS maxId FROM labels",
       args: [],
     });
     maxLabelId = Number(row.rows[0]?.maxId ?? 0);
-    labelCount = Number(row.rows[0]?.total ?? 0);
   } catch (err) {
     console.error("[heartbeat] db query failed", err);
   }
   console.log(
     `[heartbeat] rss=${fmtMB(mem.rss)} heapUsed=${fmtMB(mem.heapUsed)}/` +
       `${fmtMB(mem.heapTotal)} ext=${fmtMB(mem.external)} subs=${subs} ` +
-      `labels=${labelCount} maxId=${maxLabelId} ` +
+      `maxId=${maxLabelId} ` +
       `uptimeSec=${Math.round(process.uptime())}`,
   );
 }, HEARTBEAT_INTERVAL_MS);

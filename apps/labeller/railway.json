@@ -13,6 +13,6 @@
     "restartPolicyType": "ON_FAILURE",
     "drainingSeconds": 15,
     "healthcheckPath": "/xrpc/_health",
-    "healthcheckTimeout": 30
+    "healthcheckTimeout": 1200
   }
 }

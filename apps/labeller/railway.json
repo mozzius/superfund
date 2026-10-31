@@ -13,6 +13,11 @@
     "restartPolicyType": "ON_FAILURE",
     "drainingSeconds": 15,
     "healthcheckPath": "/xrpc/_health",
-    "healthcheckTimeout": 1200
+    "healthcheckTimeout": 1200,
+    "limitOverride": {
+      "containers": {
+        "memoryBytes": 1000000000
+      }
+    }
   }
 }

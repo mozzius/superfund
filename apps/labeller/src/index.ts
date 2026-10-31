@@ -2,6 +2,7 @@ import { LabelerServer } from "@skyware/labeler";
 import { createInternalServer } from "./internal.ts";
 import { registerDashboardRoutes } from "./dashboard.ts";
 import { ensureIndexes } from "./db.ts";
+import { compactLabelsDb } from "./compact.ts";
 
 const did = process.env.LABELER_DID;
 const signingKey = process.env.SIGNING_KEY;
@@ -36,6 +37,11 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  * Type: Posts
  * Severity: Informational
  */
+
+// One-off: set COMPACT_LABELS_DB=1 for a single deploy, then unset it.
+if (process.env.COMPACT_LABELS_DB === "1") {
+  compactLabelsDb(dbPath);
+}
 
 const labeler = new LabelerServer({ did, signingKey, dbPath });
 

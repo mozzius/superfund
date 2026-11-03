@@ -10,6 +10,11 @@
   },
   "deploy": {
     "startCommand": "pnpm -F ingester start",
-    "restartPolicyType": "ON_FAILURE"
+    "restartPolicyType": "ON_FAILURE",
+    "limitOverride": {
+      "containers": {
+        "memoryBytes": 500000000
+      }
+    }
   }
 }

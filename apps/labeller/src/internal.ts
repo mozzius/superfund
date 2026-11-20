@@ -1,7 +1,7 @@
 import type { LabelerServer } from "@skyware/labeler";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
-import { routes, type SavedLabel } from "labeller-client";
+import { routes, type SavedLabel, type Subject } from "labeller-client";
 
 /** Result of building the queryLabels WHERE clause. */
 export interface QueryLabelsSql {
@@ -185,46 +185,100 @@ export function createInternalServer(
 
   app.post(routes.upsertLabel.path, async (req) => {
     const { subject, val, expiresInMs } = routes.upsertLabel.input.parse(req.body);
-    return withUpsertLock(`${subject.uri}\0${val}`, async () => {
-      const nowMs = Date.now();
+    return withUpsertLock(`${subject.uri}\0${val}`, async () => ({
+      labels: await upsertExpiringLabel(labeler, subject, val, expiresInMs),
+    }));
+  });
 
-      const existing = await labeler.db.execute({
-        sql: `SELECT id, neg, exp FROM labels
-              WHERE src = ? AND uri = ? AND val = ?
-              ORDER BY id DESC LIMIT 1`,
-        args: [labeler.did, subject.uri, val],
-      });
-      const latest = existing.rows[0];
+  app.post(routes.setLabelGroup.path, async (req) => {
+    const { subject, group, val, expiresInMs } = routes.setLabelGroup.input.parse(req.body);
+    // Group members are only ever written through this route, so one lock per
+    // (subject, group) is enough to stop two evaluations interleaving.
+    const lockKey = `${subject.uri}\0group:${[...group].sort().join(",")}`;
+    return withUpsertLock(lockKey, async () => {
       const emitted: SavedLabel[] = [];
-
-      if (!shouldReissueLabel(latest, nowMs, expiresInMs)) {
-        return { labels: emitted };
+      for (const other of group) {
+        if (other === val) continue;
+        emitted.push(...(await negateLabelIfActive(labeler, subject, other)));
       }
-
-      const isActive =
-        latest &&
-        !Number(latest.neg) &&
-        (!latest.exp || Date.parse(String(latest.exp)) > nowMs);
-      if (isActive) {
-        const neg = await labeler.createLabel({
-          uri: subject.uri,
-          cid: subject.cid,
-          val,
-          neg: true,
-        });
-        emitted.push(neg as SavedLabel);
+      if (val !== null) {
+        emitted.push(...(await upsertExpiringLabel(labeler, subject, val, expiresInMs)));
       }
-
-      const created = await labeler.createLabel({
-        uri: subject.uri,
-        cid: subject.cid,
-        val,
-        exp: new Date(nowMs + expiresInMs).toISOString(),
-      });
-      emitted.push(created as SavedLabel);
       return { labels: emitted };
     });
   });
 
   return app;
+}
+
+async function latestLabel(
+  labeler: LabelerServer,
+  uri: string,
+  val: string,
+): Promise<Record<string, unknown> | undefined> {
+  const existing = await labeler.db.execute({
+    sql: `SELECT id, neg, exp FROM labels
+          WHERE src = ? AND uri = ? AND val = ?
+          ORDER BY id DESC LIMIT 1`,
+    args: [labeler.did, uri, val],
+  });
+  return existing.rows[0];
+}
+
+function isActiveLabel(latest: Record<string, unknown> | undefined, nowMs: number): boolean {
+  return (
+    !!latest &&
+    !Number(latest.neg) &&
+    (!latest.exp || Date.parse(String(latest.exp)) > nowMs)
+  );
+}
+
+/** Apply `val` as an expiring label, re-issuing it only when the expiry needs pushing out. */
+async function upsertExpiringLabel(
+  labeler: LabelerServer,
+  subject: Subject,
+  val: string,
+  expiresInMs: number,
+): Promise<SavedLabel[]> {
+  const nowMs = Date.now();
+  const latest = await latestLabel(labeler, subject.uri, val);
+  const emitted: SavedLabel[] = [];
+
+  if (!shouldReissueLabel(latest, nowMs, expiresInMs)) return emitted;
+
+  if (isActiveLabel(latest, nowMs)) {
+    const neg = await labeler.createLabel({
+      uri: subject.uri,
+      cid: subject.cid,
+      val,
+      neg: true,
+    });
+    emitted.push(neg as SavedLabel);
+  }
+
+  const created = await labeler.createLabel({
+    uri: subject.uri,
+    cid: subject.cid,
+    val,
+    exp: new Date(nowMs + expiresInMs).toISOString(),
+  });
+  emitted.push(created as SavedLabel);
+  return emitted;
+}
+
+/** Negate `val` on the subject if it is currently active; no-op otherwise. */
+async function negateLabelIfActive(
+  labeler: LabelerServer,
+  subject: Subject,
+  val: string,
+): Promise<SavedLabel[]> {
+  const latest = await latestLabel(labeler, subject.uri, val);
+  if (!isActiveLabel(latest, Date.now())) return [];
+  const neg = await labeler.createLabel({
+    uri: subject.uri,
+    cid: subject.cid,
+    val,
+    neg: true,
+  });
+  return [neg as SavedLabel];
 }

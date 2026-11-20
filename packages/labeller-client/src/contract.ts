@@ -42,6 +42,25 @@ export const upsertLabelOutput = z.object({
   labels: z.array(savedLabelSchema),
 });
 
+/**
+ * Keep at most one label from `group` active on the subject: `val` is applied
+ * (as an expiring label, refreshed like upsertLabel) and every other member of
+ * the group is negated. `val: null` negates the whole group.
+ */
+export const setLabelGroupInput = z
+  .object({
+    subject: subjectSchema,
+    group: z.array(z.string()).min(1),
+    val: z.string().nullable(),
+    expiresInMs: z.number().int().positive(),
+  })
+  .refine((input) => input.val === null || input.group.includes(input.val), {
+    message: "val must be a member of group",
+  });
+export const setLabelGroupOutput = z.object({
+  labels: z.array(savedLabelSchema),
+});
+
 export const routes = {
   createLabels: {
     method: "POST",
@@ -60,6 +79,12 @@ export const routes = {
     path: "/upsert-label",
     input: upsertLabelInput,
     output: upsertLabelOutput,
+  },
+  setLabelGroup: {
+    method: "POST",
+    path: "/set-label-group",
+    input: setLabelGroupInput,
+    output: setLabelGroupOutput,
   },
 } as const;
 

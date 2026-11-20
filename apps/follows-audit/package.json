@@ -1,0 +1,21 @@
+{
+  "name": "follows-audit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env --watch src/index.ts",
+    "start": "node src/index.ts",
+    "probe": "node --env-file-if-exists=.env src/probe.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@skyware/jetstream": "^0.2.5",
+    "labeller-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

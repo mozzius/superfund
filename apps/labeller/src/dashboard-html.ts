@@ -113,14 +113,69 @@ export const dashboardHtml = html`<!doctype html>
   details.more > summary:hover { text-decoration: underline; }
   details.more[open] > summary::after { content: " (hide)"; color: var(--muted); }
   details.more > .posts { margin-top: 6px; }
+  .tabs { display: flex; gap: 6px; margin-top: 16px; }
+  .tabs button {
+    background: none;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--fg); background: var(--panel); border-color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; }
+  .chip {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .chip b { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .row {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+  }
+  .row .rank { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row .who { min-width: 0; }
+  .row .who a { color: var(--fg); text-decoration: none; font-weight: 600; }
+  .row .who a:hover { text-decoration: underline; }
+  .row .who .did { color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
+  .row .score { text-align: right; min-width: 110px; }
+  .row .pct { font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .row .bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .row .bar span { display: block; height: 100%; background: var(--accent); }
 </style>
 </head>
 <body>
 <main>
   <header>
     <h1>labelled users</h1>
-    <div class="sub">accounts carrying <code>doesnt-know-how-replyrefs-work</code> and the posts that tripped them</div>
+    <div class="sub" id="sub-replyrefs">accounts carrying <code>doesnt-know-how-replyrefs-work</code> and the posts that tripped them</div>
+    <div class="sub" id="sub-follows" hidden>accounts whose follows have been taken down the most (up to 1,000 most recent follows each)</div>
+    <div class="sub" id="sub-followers" hidden>accounts whose followers have been taken down the most (up to 1,000 most recent followers each)</div>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="replyrefs" aria-selected="true">replyrefs</button>
+      <button type="button" role="tab" data-tab="follows" aria-selected="false">follows taken down</button>
+      <button type="button" role="tab" data-tab="followers" aria-selected="false">followers taken down</button>
+    </nav>
   </header>
+  <section id="view-takedowns" hidden>
+    <div id="takedowns-summary" class="summary">loading…</div>
+    <div id="takedowns-chips" class="chips"></div>
+    <div id="takedowns-list"></div>
+  </section>
+  <section id="view-replyrefs">
   <div id="summary" class="summary">loading…</div>
   <div id="controls" class="controls" hidden>
     <span class="label">sort by</span>
@@ -132,6 +187,7 @@ export const dashboardHtml = html`<!doctype html>
     <button type="button" id="copy-profiles">copy profile urls</button>
   </div>
   <div id="list"></div>
+  </section>
 </main>
 <script>
   const listEl = document.getElementById("list");
@@ -364,6 +420,117 @@ export const dashboardHtml = html`<!doctype html>
   }
 
   load();
+
+  // --- "follows / followers taken down" tabs (data proxied from follows-audit).
+
+  const tdSummaryEl = document.getElementById("takedowns-summary");
+  const tdChipsEl = document.getElementById("takedowns-chips");
+  const tdListEl = document.getElementById("takedowns-list");
+  let takedownData = null; // { generatedAt, follows, followers, profiles }
+  let takedownLoading = null;
+  let currentTab = "replyrefs";
+
+  const ago = (iso) => {
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (s < 3600) return Math.max(1, Math.round(s / 60)) + "m ago";
+    if (s < 86400) return Math.round(s / 3600) + "h ago";
+    return Math.round(s / 86400) + "d ago";
+  };
+
+  // Batched lookup. getProfiles silently drops taken-down / deactivated
+  // accounts, so anything missing from the response is treated as gone.
+  async function batchProfiles(dids) {
+    const found = new Map();
+    for (let i = 0; i < dids.length; i += 25) {
+      const q = dids.slice(i, i + 25).map((d) => "actors=" + encodeURIComponent(d)).join("&");
+      const res = await fetch("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfiles?" + q);
+      if (!res.ok) throw new Error("getProfiles HTTP " + res.status);
+      for (const p of (await res.json()).profiles ?? []) found.set(p.did, p);
+    }
+    return found;
+  }
+
+  async function loadTakedowns() {
+    const res = await fetch("/dashboard/follows");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "HTTP " + res.status);
+    const dids = [...new Set([...data.follows.accounts, ...data.followers.accounts].map((a) => a.did))];
+    data.profiles = dids.length ? await batchProfiles(dids) : new Map();
+    takedownData = data;
+  }
+
+  function renderTakedowns(direction) {
+    const data = takedownData;
+    const view = data[direction];
+    const profiles = data.profiles;
+    const buckets = view.buckets ?? {};
+    const checked = Object.values(buckets).reduce((a, n) => a + n, 0);
+    tdChipsEl.innerHTML = view.thresholds.map((t, i) => {
+      const next = view.thresholds[i + 1];
+      const range = next ? t + "–" + next + "%" : t + "%+";
+      return '<span class="chip">' + range + ' <b>' + (buckets[t] ?? 0) + '</b></span>';
+    }).join("");
+
+    const visible = view.accounts.filter((a) => profiles.has(a.did));
+    const gone = view.accounts.length - visible.length;
+    tdSummaryEl.textContent = checked + " accounts checked in the last 30 days" +
+      (gone ? " (" + gone + " suspended/deactivated hidden)" : "") +
+      " · updated " + ago(data.generatedAt);
+
+    if (!visible.length) {
+      tdListEl.innerHTML = '<div class="empty">nobody checked yet</div>';
+      return;
+    }
+    const max = Math.max(...visible.map((a) => a.pct), 1);
+    tdListEl.innerHTML = visible.map((a, i) => {
+      const p = profiles.get(a.did);
+      return '<div class="row">' +
+        '<span class="rank">' + (i + 1) + '</span>' +
+        '<div class="who"><a href="' + esc(bskyProfileUrl(a.did, p.handle)) + '" target="_blank" rel="noopener">@' +
+          esc(p.handle) + '</a><span class="did">' + esc(a.did) + '</span></div>' +
+        '<div class="score"><div class="pct">' + a.pct.toFixed(1) + '%</div>' +
+          '<div class="meta">' + a.takendown + ' / ' + a.counted + ' &middot; ' + esc(ago(a.checkedAt)) + '</div>' +
+          '<div class="bar"><span style="width:' + (a.pct / max * 100).toFixed(1) + '%"></span></div></div>' +
+      '</div>';
+    }).join("");
+  }
+
+  async function showTakedowns(direction) {
+    if (!takedownData) {
+      tdSummaryEl.textContent = "loading…";
+      tdChipsEl.innerHTML = "";
+      tdListEl.innerHTML = "";
+      try {
+        takedownLoading ??= loadTakedowns();
+        await takedownLoading;
+      } catch (err) {
+        takedownLoading = null;
+        tdSummaryEl.innerHTML = '<span class="err">failed to load: ' + esc(String(err.message ?? err)) + '</span>';
+        return;
+      }
+    }
+    if (currentTab === direction) renderTakedowns(direction);
+  }
+
+  const tabs = ["replyrefs", "follows", "followers"];
+  function showTab(tab) {
+    if (!tabs.includes(tab)) tab = "replyrefs";
+    currentTab = tab;
+    document.getElementById("view-replyrefs").hidden = tab !== "replyrefs";
+    document.getElementById("view-takedowns").hidden = tab === "replyrefs";
+    for (const t of tabs) document.getElementById("sub-" + t).hidden = t !== tab;
+    for (const b of document.querySelectorAll(".tabs button")) {
+      b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false");
+    }
+    if (tab !== "replyrefs") showTakedowns(tab);
+  }
+  document.querySelector(".tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-tab]");
+    if (!btn) return;
+    history.replaceState(null, "", btn.dataset.tab === "replyrefs" ? location.pathname : "#" + btn.dataset.tab);
+    showTab(btn.dataset.tab);
+  });
+  showTab(location.hash.slice(1));
 </script>
 </body>
 </html>

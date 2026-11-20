@@ -1,7 +1,9 @@
 // Railway infrastructure for the superfund project (production).
 //
-// Railway doesn't read this file on deploy: after changing it, run
-// `railway config plan` to preview and `railway config apply` to push it.
+// Railway doesn't read this file on deploy; CI applies it instead
+// (.github/workflows/railway-*.yml). PRs get a plan comment and the reviewed
+// plan is applied on merge; direct pushes to main plan and apply on the spot
+// (non-destructive changes only). Locally: `railway config plan` / `apply`.
 // Pushes to main still autodeploy each service from GitHub as usual.
 //
 // Variables are unmanaged: IaC never reads or writes them, so secrets and

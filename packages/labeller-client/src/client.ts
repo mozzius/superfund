@@ -36,6 +36,7 @@ export function createLabellerClient(opts: LabellerClientOptions) {
     createLabels: (input: RouteInput<"createLabels">) => call("createLabels", input),
     queryLabels: (input: RouteInput<"queryLabels">) => call("queryLabels", input),
     upsertLabel: (input: RouteInput<"upsertLabel">) => call("upsertLabel", input),
+    setLabelGroup: (input: RouteInput<"setLabelGroup">) => call("setLabelGroup", input),
   };
 }
 

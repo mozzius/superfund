@@ -1,0 +1,20 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "RAILPACK",
+    "watchPatterns": [
+      "/apps/follower-audit/**",
+      "/packages/labeller-client/**",
+      "/pnpm-lock.yaml"
+    ]
+  },
+  "deploy": {
+    "startCommand": "pnpm -F follower-audit start",
+    "restartPolicyType": "ON_FAILURE",
+    "limitOverride": {
+      "containers": {
+        "memoryBytes": 500000000
+      }
+    }
+  }
+}

@@ -8,7 +8,8 @@
     "start": "node src/index.ts",
     "skyware-setup": "npx @skyware/labeler setup",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test"
+    "test": "node --test",
+    "label-defs": "node --env-file-if-exists=.env scripts/add-label-defs.ts"
   },
   "dependencies": {
     "@skyware/labeler": "^0.2.0",

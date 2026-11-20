@@ -36,6 +36,15 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  * Description: Has posted a fucked-up replyRef within the last 30 days
  * Type: Posts
  * Severity: Informational
+ *
+ * Account labels set by apps/follower-audit (share of an account's recent
+ * followers that have been taken down). At most one is active per account.
+ * Declared with `pnpm -F labeller label-defs`; see scripts/add-label-defs.ts.
+ *
+ * ID: `followers-takendown-ten` / `-twenty` / `-thirty` / `-forty` / `-fifty`
+ * Name: 10–20% … 50%+ of followers taken down
+ * Type: Accounts
+ * Severity: Informational
  */
 
 // One-off: set COMPACT_LABELS_DB=1 for a single deploy, then unset it.

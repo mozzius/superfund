@@ -1,0 +1,79 @@
+# Applies .railway/railway.ts to the production environment.
+#
+# - Commit from a merged PR: apply exactly the plan reviewed on that PR
+#   (railway-plan.yml). Fails if the environment or .railway/ moved since.
+# - Direct push to main, or a manual run: no reviewed plan exists, so plan
+#   and apply now. Without --confirm-destructive the CLI refuses anything
+#   that would delete resources; send those through a PR or apply by hand.
+name: Railway apply
+
+on:
+  push:
+    branches: [main]
+    paths: [".railway/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: railway-apply
+  cancel-in-progress: false
+
+env:
+  RAILWAY_CLI_VERSION: 5.75.0
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the merged PR for this commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          merged=false
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+              --jq '[.[] | select(.merged_at != null)] | length')
+            [ "$n" -gt 0 ] && merged=true
+          fi
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+          echo "came from a merged PR: $merged"
+
+      - name: Apply the PR's reviewed plan
+        if: steps.pr.outputs.merged == 'true'
+        uses: railwayapp/config@9e17d413dbe219f19d62538d9c06b5dbb5e9abf8 # v1.2.0
+        with:
+          command: apply
+          railway-token: ${{ secrets.RAILWAY_TOKEN }}
+          cli-version: ${{ env.RAILWAY_CLI_VERSION }}
+
+      - if: steps.pr.outputs.merged != 'true'
+        uses: pnpm/action-setup@v4
+      - if: steps.pr.outputs.merged != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies (for railway/iac)
+        if: steps.pr.outputs.merged != 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Install Railway CLI
+        if: steps.pr.outputs.merged != 'true'
+        # Outside the checkout, so the pnpm workspace root can't interfere.
+        working-directory: ${{ runner.temp }}
+        run: npm install -g "@railway/cli@$RAILWAY_CLI_VERSION"
+
+      - name: Plan and apply
+        if: steps.pr.outputs.merged != 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway config plan | tee plan.txt
+          { echo '### Railway config plan'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          railway config apply --yes

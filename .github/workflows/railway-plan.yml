@@ -1,0 +1,28 @@
+# Posts a Railway IaC plan comment on PRs that change .railway/ and pins
+# that plan as an artifact; railway-apply.yml applies exactly this plan when
+# the PR merges.
+name: Railway plan
+
+on:
+  pull_request:
+    paths: [".railway/**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+  # Lets the action post the comment as the Railway bot (via the Railway
+  # GitHub App); it falls back to github-actions otherwise.
+  id-token: write
+
+jobs:
+  plan:
+    # Fork PRs don't get secrets.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: railwayapp/config@9e17d413dbe219f19d62538d9c06b5dbb5e9abf8 # v1.2.0
+        with:
+          command: plan
+          railway-token: ${{ secrets.RAILWAY_TOKEN }}
+          cli-version: 5.75.0

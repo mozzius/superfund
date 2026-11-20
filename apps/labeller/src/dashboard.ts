@@ -28,8 +28,40 @@ interface AccountEntry {
 const ACCOUNT_LABEL = "doesnt-know-how-replyrefs-work";
 const POST_LABEL = "fucked-up-replyref";
 
-export function registerDashboardRoutes(server: LabelerServer) {
+export interface DashboardOptions {
+  /** follows-audit's internal base URL; the follows tab is empty without it. */
+  followsAuditUrl?: string;
+  internalApiKey: string;
+}
+
+const FOLLOWS_CACHE_MS = 30_000;
+
+export function registerDashboardRoutes(server: LabelerServer, opts: DashboardOptions) {
   const app = server.app;
+  let followsCache: { at: number; body: unknown } | undefined;
+
+  // Proxies follows-audit's evaluations (it keeps them in its own DB/volume).
+  app.get("/dashboard/follows", async (_req, reply) => {
+    if (!opts.followsAuditUrl) {
+      return reply.code(503).send({ error: "FOLLOWS_AUDIT_URL is not set" });
+    }
+    if (followsCache && Date.now() - followsCache.at < FOLLOWS_CACHE_MS) {
+      return followsCache.body;
+    }
+    try {
+      const res = await fetch(`${opts.followsAuditUrl.replace(/\/$/, "")}/data.json`, {
+        headers: { authorization: `Bearer ${opts.internalApiKey}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`follows-audit returned ${res.status}`);
+      const body = await res.json();
+      followsCache = { at: Date.now(), body };
+      return body;
+    } catch (err) {
+      console.error("[dashboard] follows-audit fetch failed", err);
+      return reply.code(502).send({ error: "couldn't reach follows-audit" });
+    }
+  });
 
   app.get("/dashboard", async (_req, reply) => {
     reply.type("text/html; charset=utf-8").send(dashboardHtml);

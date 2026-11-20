@@ -37,12 +37,18 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  * Type: Posts
  * Severity: Informational
  *
- * Account labels set by apps/follows-audit (share of the accounts an account
- * follows that have been taken down). At most one is active per account.
- * Declared with `pnpm -F labeller label-defs`; see scripts/add-label-defs.ts.
+ * Account labels set by apps/follows-audit: the share of an account's follows,
+ * and of its followers, that have been taken down. At most one label per
+ * family is active per account. Declared with `pnpm -F labeller label-defs`;
+ * see scripts/add-label-defs.ts.
  *
  * ID: `follows-takendown-one` / `-five` / `-ten` / `-twenty` / `-thirty` / `-forty` / `-fifty`
  * Name: 1–5% … 50%+ of follows taken down
+ * Type: Accounts
+ * Severity: Informational
+ *
+ * ID: `followers-takendown-twenty` / `-thirty` / `-forty` / `-fifty`
+ * Name: 20–30% … 50%+ of followers taken down
  * Type: Accounts
  * Severity: Informational
  */
@@ -64,7 +70,10 @@ await new Promise<void>((resolve) => setImmediate(resolve));
 
 await ensureIndexes(labeler);
 
-registerDashboardRoutes(labeler);
+registerDashboardRoutes(labeler, {
+  followsAuditUrl: process.env.FOLLOWS_AUDIT_URL,
+  internalApiKey,
+});
 
 labeler.start({ port: publicPort, host: "::" }, (error, address) => {
   if (error) {

@@ -1,6 +1,6 @@
 /**
- * Labels accounts by the share of the accounts they follow that have been
- * taken down.
+ * Labels accounts by the share of the accounts they follow, and of their
+ * followers, that have been taken down.
  *
  * Discovery runs off takedowns, not posts: when the firehose says an account
  * was taken down, Constellation's backlinks give us who followed it, and each
@@ -9,10 +9,10 @@
  * audit of their follows.
  */
 import { Jetstream } from "@skyware/jetstream";
-import { createLabellerClient, TAKEDOWN_LABEL_FAMILIES } from "labeller-client";
+import { createLabellerClient, TAKEDOWN_LABEL_FAMILIES, type AuditDirection } from "labeller-client";
 import { evaluateAccount, TAKEDOWN_STATUSES, type AuditDeps } from "./audit.ts";
 import { loadConfig } from "./config.ts";
-import { createDashboard } from "./dashboard.ts";
+import { createDataServer } from "./data-server.ts";
 import {
   fetchFollowerSample,
   fetchFollowsSample,
@@ -171,50 +171,66 @@ async function fanOutWorker() {
 }
 
 // --- Audit: labelled accounts due a refresh first, then the top candidates.
+// A candidate gets both checks: its follows (the main signal) and its
+// followers. A taken-down account's own follow list can't be read any more,
+// so there's no direct way to find who the bots were following; accounts
+// near takedowns are where bot networks cluster, so they're the pool for both.
 
-function nextAccount(): { did: string; why: string } | undefined {
-  const relabel = store.dueForRelabel("follows", config.relabelMs);
-  if (relabel) return { did: relabel, why: "relabel" };
+const DIRECTIONS: readonly AuditDirection[] = ["follows", "followers"];
+
+interface Job {
+  did: string;
+  why: string;
+  directions: readonly AuditDirection[];
+}
+
+function nextJob(): Job | undefined {
+  for (const direction of DIRECTIONS) {
+    const did = store.dueForRelabel(direction, config.relabelMs);
+    if (did) return { did, why: "relabel", directions: [direction] };
+  }
   while (true) {
     const candidate = store.takeCandidate(config.minHits, config.cooldownMs);
     if (!candidate) return undefined;
     // Followers that were themselves taken down / deleted can't be audited.
     const status = store.getStatuses([candidate.did]).get(candidate.did);
     if (status && status !== "active") continue;
-    return { did: candidate.did, why: `hits=${candidate.hits}` };
+    return { did: candidate.did, why: `hits=${candidate.hits}`, directions: DIRECTIONS };
   }
 }
 
 async function auditWorker(id: number) {
   while (!stopping) {
-    const next = nextAccount();
-    if (!next) {
+    const job = nextJob();
+    if (!job) {
       await sleep(5_000);
       continue;
     }
-    const { did, why } = next;
-    try {
-      const r = await evaluateAccount(did, "follows", deps, config);
-      stats.evaluated++;
-      if (why === "relabel") stats.relabelled++;
-      stats.cacheHits += r.cacheHits;
-      stats.relayLookups += r.relayLookups;
-      if (r.skipped) stats.skipped++;
-      if (r.labelCall === "set") stats.labelled++;
-      if (r.labelCall === "clear") stats.cleared++;
-      if (!r.skipped) {
-        console.log(
-          `[audit w${id}] did=${did} ${why} sampled=${r.sampled} counted=${r.counted} ` +
-            `takendown=${r.takendown} pct=${r.percent?.toFixed(2)} ` +
-            `bucket=${r.previousBucket ?? "-"}->${r.bucket} label=${r.label ?? "-"} ` +
-            `cacheHits=${r.cacheHits} relay=${r.relayLookups}`,
-        );
+    const { did, why } = job;
+    for (const direction of job.directions) {
+      try {
+        const r = await evaluateAccount(did, direction, deps, config);
+        stats.evaluated++;
+        if (why === "relabel") stats.relabelled++;
+        stats.cacheHits += r.cacheHits;
+        stats.relayLookups += r.relayLookups;
+        if (r.skipped) stats.skipped++;
+        if (r.labelCall === "set") stats.labelled++;
+        if (r.labelCall === "clear") stats.cleared++;
+        if (!r.skipped) {
+          console.log(
+            `[audit w${id}] did=${did} ${direction} ${why} sampled=${r.sampled} counted=${r.counted} ` +
+              `takendown=${r.takendown} pct=${r.percent?.toFixed(2)} ` +
+              `bucket=${r.previousBucket ?? "-"}->${r.bucket} label=${r.label ?? "-"} ` +
+              `cacheHits=${r.cacheHits} relay=${r.relayLookups}`,
+          );
+        }
+      } catch (err) {
+        stats.errors++;
+        // Don't spin on an account we can't read (PDS down, repo gone, ...).
+        if (why === "relabel") store.touchEvaluation(did, direction);
+        console.error(`[audit w${id}] failed did=${did} ${direction} ${why}`, err);
       }
-    } catch (err) {
-      stats.errors++;
-      // Don't spin on an account we can't read (PDS down, repo gone, ...).
-      if (why === "relabel") store.touchEvaluation(did, "follows");
-      console.error(`[audit w${id}] failed did=${did} ${why}`, err);
     }
   }
 }
@@ -269,7 +285,7 @@ process.on("unhandledRejection", (reason) => console.error("[fatal] unhandledRej
 
 const shutdown = () => {
   stopping = true;
-  dashboard.close();
+  dataServer.close();
   if (latestCursor !== undefined) store.saveCursor(latestCursor);
   store.close();
   process.exit(0);
@@ -278,8 +294,8 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 const port = Number(process.env.PORT ?? 14833);
-const dashboard = createDashboard(store, () => lastStats);
-dashboard.listen(port, "::", () => console.log(`dashboard listening on :${port}`));
+const dataServer = createDataServer(store, internalApiKey, () => lastStats);
+dataServer.listen(port, "::", () => console.log(`data server listening on :${port}`));
 
 connect();
 void fanOutWorker();

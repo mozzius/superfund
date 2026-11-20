@@ -1,8 +1,7 @@
 /**
- * Adds (or updates) the follows-takendown label definitions on the labeler's
- * app.bsky.labeler.service record, and removes the retired
- * followers-takendown-* ones if they were ever declared. Other definitions
- * and the rest of the record are left untouched.
+ * Adds (or updates) the follows-takendown-* and followers-takendown-* label
+ * definitions on the labeler's app.bsky.labeler.service record. Other
+ * definitions and the rest of the record are left untouched.
  *
  *   LABELER_IDENTIFIER=labeler.example.com LABELER_PASSWORD=xxxx \
  *     pnpm -F labeller label-defs [--dry-run]
@@ -10,7 +9,7 @@
  * LABELER_IDENTIFIER defaults to LABELER_DID. An app password works.
  * LABELER_PDS defaults to https://bsky.social.
  */
-import { FOLLOWS_TAKEDOWN_LABELS } from "labeller-client";
+import { TAKEDOWN_LABEL_FAMILIES, type AuditDirection } from "labeller-client";
 
 interface LabelValueDefinition {
   identifier: string;
@@ -21,34 +20,45 @@ interface LabelValueDefinition {
   locales: { lang: string; name: string; description: string }[];
 }
 
-const RETIRED_PREFIX = "followers-takendown-";
+const WORDING: Record<AuditDirection, { name: string; subject: string; basis: string }> = {
+  follows: {
+    name: "of follows taken down",
+    subject: "of the accounts this account follows",
+    basis: "Based on up to 1,000 of its most recent follows.",
+  },
+  followers: {
+    name: "of followers taken down",
+    subject: "of this account's followers",
+    basis: "Based on up to 1,000 of its most recent followers.",
+  },
+};
 
-const FOOTNOTE =
-  "Based on up to 1,000 of the accounts it most recently followed, re-checked regularly. " +
-  "Following someone isn't endorsing them, and follow-back habits can push this up.";
-
-const definitions: LabelValueDefinition[] = FOLLOWS_TAKEDOWN_LABELS.map((label, i) => {
-  const next = FOLLOWS_TAKEDOWN_LABELS[i + 1];
-  const range = next ? `${label.minPercent}–${next.minPercent}%` : `${label.minPercent}%+`;
-  const share = next
-    ? `Between ${label.minPercent}% and ${next.minPercent}%`
-    : `${label.minPercent}% or more`;
-  return {
-    identifier: label.val,
-    severity: "inform",
-    blurs: "none",
-    defaultSetting: "warn",
-    adultOnly: false,
-    locales: [
-      {
-        lang: "en",
-        name: `${range} of follows taken down`,
-        description:
-          `${share} of the accounts this account follows have been taken down by moderation. ${FOOTNOTE}`,
-      },
-    ],
-  };
-});
+const definitions: LabelValueDefinition[] = (
+  Object.entries(TAKEDOWN_LABEL_FAMILIES) as [AuditDirection, (typeof TAKEDOWN_LABEL_FAMILIES)[AuditDirection]][]
+).flatMap(([direction, family]) =>
+  family.map((label, i) => {
+    const next = family[i + 1];
+    const range = next ? `${label.minPercent}–${next.minPercent}%` : `${label.minPercent}%+`;
+    const share = next
+      ? `Between ${label.minPercent}% and ${next.minPercent}%`
+      : `${label.minPercent}% or more`;
+    const w = WORDING[direction];
+    return {
+      identifier: label.val,
+      severity: "inform",
+      blurs: "none",
+      defaultSetting: "warn",
+      adultOnly: false,
+      locales: [
+        {
+          lang: "en",
+          name: `${range} ${w.name}`,
+          description: `${share} ${w.subject} have been taken down by moderation. ${w.basis}`,
+        },
+      ],
+    } satisfies LabelValueDefinition;
+  }),
+);
 
 const dryRun = process.argv.includes("--dry-run");
 const identifier = process.env.LABELER_IDENTIFIER ?? process.env.LABELER_DID;
@@ -103,7 +113,7 @@ const record = existing.value;
 const oldDefs: LabelValueDefinition[] = record.policies?.labelValueDefinitions ?? [];
 const oldValues: string[] = record.policies?.labelValues ?? [];
 const newIds = new Set(definitions.map((d) => d.identifier));
-const keep = (id: string) => !newIds.has(id) && !id.startsWith(RETIRED_PREFIX);
+const keep = (id: string) => !newIds.has(id);
 
 const mergedDefs = [...oldDefs.filter((d) => keep(d.identifier)), ...definitions];
 const mergedValues = [
@@ -114,9 +124,6 @@ console.log(`labeler ${session.did} on ${pds}`);
 for (const d of definitions) {
   const verb = oldDefs.some((o) => o.identifier === d.identifier) ? "update" : "add   ";
   console.log(`  ${verb} ${d.identifier}  "${d.locales[0]!.name}"`);
-}
-for (const d of oldDefs.filter((o) => o.identifier.startsWith(RETIRED_PREFIX))) {
-  console.log(`  remove ${d.identifier}`);
 }
 const kept = oldDefs.filter((d) => keep(d.identifier)).map((d) => d.identifier);
 console.log(`  keep   ${kept.join(", ") || "(none)"}`);

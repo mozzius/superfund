@@ -8,3 +8,6 @@ node_modules
 .agents
 .claude
 skills-lock.json
+
+# railway config migrate cutover/undo snapshot (local state)
+.railway/.cac-migration.json

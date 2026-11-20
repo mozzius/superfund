@@ -1,12 +1,14 @@
 /**
  * Labels accounts by the share of the accounts they follow, and of their
- * followers, that have been taken down.
+ * followers, that have been taken down (or suspended).
  *
  * Discovery runs off takedowns, not posts: when the firehose says an account
- * was taken down, Constellation's backlinks give us who followed it, and each
- * of those followers gets a "hit". Accounts that follow lots of freshly
- * taken-down accounts float to the top of the candidate list and get a full
- * audit of their follows.
+ * was taken down or suspended, or Bluesky's mod service labels it `!takedown`
+ * / `!suspend` (which also covers appview-only takedowns the firehose never
+ * sees), Constellation's backlinks give us who followed it, and each of those
+ * followers gets a "hit". Accounts that follow lots of freshly taken-down
+ * accounts float to the top of the candidate list and get a full audit of
+ * their follows.
  */
 import { Jetstream } from "@skyware/jetstream";
 import { createLabellerClient, TAKEDOWN_LABEL_FAMILIES, type AuditDirection } from "labeller-client";
@@ -14,13 +16,20 @@ import { evaluateAccount, TAKEDOWN_STATUSES, type AuditDeps } from "./audit.ts";
 import { loadConfig } from "./config.ts";
 import { createDataServer } from "./data-server.ts";
 import {
+  isAccountTakedownLabel,
+  isExpired,
+  MOD_TAKEDOWN_LABELS,
+  subscribeLabelStream,
+} from "./mod-labels.ts";
+import {
   fetchFollowerSample,
   fetchFollowsSample,
+  fetchModTakedowns,
   fetchRepoStatus,
   fetchVisibleProfiles,
   requestStats,
 } from "./sources.ts";
-import { AuditStore } from "./store.ts";
+import { AuditStore, type TakedownQueueResult } from "./store.ts";
 
 const labellerUrl = process.env.LABELLER_URL;
 const internalApiKey = process.env.INTERNAL_API_KEY;
@@ -37,6 +46,7 @@ const store = new AuditStore({
   evaluationTtlMs: config.labelExpiryMs,
   candidateTtlMs: config.candidateTtlMs,
   maxPendingTakedowns: config.maxPendingTakedowns,
+  takedownDedupMs: config.takedownDedupMs,
 });
 console.log(
   `audit store ready path=${config.dbPath} pendingTakedowns=${store.pendingTakedowns}`,
@@ -49,6 +59,7 @@ const deps: AuditDeps = {
       ? fetchFollowsSample(config.plc, config.pdsHosts, did, limit)
       : fetchFollowerSample(config.constellation, did, limit),
   visibleProfiles: (dids) => fetchVisibleProfiles(config.appview, dids),
+  modTakedowns: (dids) => fetchModTakedowns(config.modService, config.modServiceDid, dids),
   repoStatus: (did) => fetchRepoStatus(config.relay, did),
   setLabel: async (did, direction, label) => {
     await labeller.setLabelGroup({
@@ -62,7 +73,13 @@ const deps: AuditDeps = {
 
 const makeStats = () => ({
   accountEvents: 0,
+  /** Takedowns/suspensions reported by the firehose. */
   takedowns: 0,
+  modLabelFrames: 0,
+  /** Takedowns/suspensions reported by the mod label stream. */
+  labelTakedowns: 0,
+  /** Already queued from the other source (or an earlier event) within the dedup window. */
+  takedownsDuplicate: 0,
   takedownsDropped: 0,
   fannedOut: 0,
   hits: 0,
@@ -73,6 +90,7 @@ const makeStats = () => ({
   cleared: 0,
   errors: 0,
   cacheHits: 0,
+  modLabelled: 0,
   relayLookups: 0,
 });
 let stats = makeStats();
@@ -80,19 +98,32 @@ let lastStats: Record<string, unknown> = {};
 let stopping = false;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function countQueued(result: TakedownQueueResult) {
+  if (result === "duplicate") stats.takedownsDuplicate++;
+  if (result === "dropped") stats.takedownsDropped++;
+}
+
 // --- Jetstream: only #account events matter. Jetstream always sends those;
 // the wanted collection is just a near-silent one so we don't get every record.
 
+const MOD_LABELS_CURSOR_KEY = "mod_labels_cursor";
 let latestCursor = store.loadCursor();
 let savedCursor = latestCursor;
+let modCursor = store.loadCursor(MOD_LABELS_CURSOR_KEY);
+let savedModCursor = modCursor;
 let lastEventAt = Date.now();
 
-const cursorFlush = setInterval(() => {
+function flushCursors() {
   if (latestCursor !== undefined && latestCursor !== savedCursor) {
     store.saveCursor(latestCursor);
     savedCursor = latestCursor;
   }
-}, 5_000);
+  if (modCursor !== undefined && modCursor !== savedModCursor) {
+    store.saveCursor(modCursor, MOD_LABELS_CURSOR_KEY);
+    savedModCursor = modCursor;
+  }
+}
+const cursorFlush = setInterval(flushCursors, 5_000);
 cursorFlush.unref();
 
 function connect() {
@@ -130,7 +161,7 @@ function connect() {
       store.applyAccountEvent(did, active, status);
       if (!active && status && TAKEDOWN_STATUSES.has(status)) {
         stats.takedowns++;
-        if (!store.addPendingTakedown(did)) stats.takedownsDropped++;
+        countQueued(store.addPendingTakedown(did));
       }
     } catch (err) {
       console.error("[account] failed to record status", err);
@@ -147,6 +178,39 @@ function connect() {
   jetstream.on("close", () => reconnect("closed"));
   jetstream.on("error", (err) => console.error("[jetstream] error", err));
   jetstream.start();
+}
+
+// --- Bluesky's mod label stream: account !takedown / !suspend labels. Most of
+// these takedowns also reach the firehose (the store dedups them); the rest are
+// appview-only takedowns of accounts on other PDSes.
+
+function startModLabelStream() {
+  subscribeLabelStream({
+    serviceUrl: config.modService.baseUrl,
+    cursor: () => modCursor,
+    onLabels: (seq, labels) => {
+      modCursor = seq;
+      stats.modLabelFrames++;
+      const now = Date.now();
+      for (const label of labels) {
+        if (!isAccountTakedownLabel(label, config.modServiceDid)) continue;
+        const did = label.uri;
+        if (label.neg) {
+          // Reversed (or swapped for the other kind): look it up fresh next time.
+          store.forgetStatus(did);
+          continue;
+        }
+        if (isExpired(label, now)) continue;
+        store.setStatuses([[did, MOD_TAKEDOWN_LABELS[label.val]!]]);
+        stats.labelTakedowns++;
+        countQueued(store.addPendingTakedown(did));
+      }
+    },
+    onErrorFrame: (error) => {
+      // Our cursor is ahead of the service (its sequence was reset): tail live.
+      if (error === "FutureCursor") modCursor = undefined;
+    },
+  });
 }
 
 // --- Fan-out: each takedown gives a hit to its most recent followers.
@@ -213,6 +277,7 @@ async function auditWorker(id: number) {
         stats.evaluated++;
         if (why === "relabel") stats.relabelled++;
         stats.cacheHits += r.cacheHits;
+        stats.modLabelled += r.modLabelled;
         stats.relayLookups += r.relayLookups;
         if (r.skipped) stats.skipped++;
         if (r.labelCall === "set") stats.labelled++;
@@ -222,7 +287,7 @@ async function auditWorker(id: number) {
             `[audit w${id}] did=${did} ${direction} ${why} sampled=${r.sampled} counted=${r.counted} ` +
               `takendown=${r.takendown} pct=${r.percent?.toFixed(2)} ` +
               `bucket=${r.previousBucket ?? "-"}->${r.bucket} label=${r.label ?? "-"} ` +
-              `cacheHits=${r.cacheHits} relay=${r.relayLookups}`,
+              `cacheHits=${r.cacheHits} mod=${r.modLabelled} relay=${r.relayLookups}`,
           );
         }
       } catch (err) {
@@ -251,10 +316,13 @@ const heartbeat = setInterval(() => {
   const mem = process.memoryUsage();
   console.log(
     `[stats 60s] accountEvents=${s.accountEvents} takedowns=${s.takedowns} ` +
-      `dropped=${s.takedownsDropped} pendingTakedowns=${store.pendingTakedowns} ` +
+      `modLabelFrames=${s.modLabelFrames} labelTakedowns=${s.labelTakedowns} ` +
+      `duplicate=${s.takedownsDuplicate} dropped=${s.takedownsDropped} ` +
+      `pendingTakedowns=${store.pendingTakedowns} ` +
       `fannedOut=${s.fannedOut} hits=${s.hits} evaluated=${s.evaluated} relabelled=${s.relabelled} ` +
       `skipped=${s.skipped} labelled=${s.labelled} cleared=${s.cleared} errors=${s.errors} ` +
-      `cacheHits=${s.cacheHits} relayLookups=${s.relayLookups} reqs[${reqs}] ` +
+      `cacheHits=${s.cacheHits} modLabelled=${s.modLabelled} relayLookups=${s.relayLookups} ` +
+      `reqs[${reqs}] ` +
       `retries=${requestStats.retries} rss=${(mem.rss / 1048576).toFixed(1)}MB ` +
       `uptimeSec=${Math.round(process.uptime())}`,
   );
@@ -286,7 +354,7 @@ process.on("unhandledRejection", (reason) => console.error("[fatal] unhandledRej
 const shutdown = () => {
   stopping = true;
   dataServer.close();
-  if (latestCursor !== undefined) store.saveCursor(latestCursor);
+  flushCursors();
   store.close();
   process.exit(0);
 };
@@ -298,5 +366,6 @@ const dataServer = createDataServer(store, internalApiKey, () => lastStats);
 dataServer.listen(port, "::", () => console.log(`data server listening on :${port}`));
 
 connect();
+startModLabelStream();
 void fanOutWorker();
 for (let i = 0; i < config.concurrency; i++) void auditWorker(i);

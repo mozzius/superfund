@@ -1,3 +1,4 @@
+import { BSKY_MOD_DID } from "./mod-labels.ts";
 import { HostLimiters, RateLimiter, type Upstream } from "./sources.ts";
 
 const DAY_MS = 86_400_000;
@@ -30,6 +31,11 @@ export function loadConfig() {
     labelExpiryMs: num("LABEL_EXPIRY_DAYS", 30) * DAY_MS,
     candidateTtlMs: num("CANDIDATE_TTL_DAYS", 14) * DAY_MS,
     maxPendingTakedowns: num("MAX_PENDING_TAKEDOWNS", 50_000),
+    /**
+     * Fan out each account's takedown once per this window. The firehose and
+     * the mod label stream both report most takedowns, often minutes apart.
+     */
+    takedownDedupMs: num("TAKEDOWN_DEDUP_DAYS", 30) * DAY_MS,
 
     activeTtlMs: num("ACTIVE_STATUS_TTL_DAYS", 7) * DAY_MS,
     inactiveTtlMs: num("INACTIVE_STATUS_TTL_DAYS", 30) * DAY_MS,
@@ -39,6 +45,9 @@ export function loadConfig() {
     appview: upstream("APPVIEW_URL", "https://public.api.bsky.app", "APPVIEW_RPS", 5),
     relay: upstream("RELAY_URL", "https://relay1.us-east.bsky.network", "RELAY_RPS", 10),
     plc: upstream("PLC_URL", "https://plc.directory", "PLC_RPS", 5),
+    /** Bluesky's moderation service, for its !takedown / !suspend account labels. */
+    modService: upstream("MOD_SERVICE_URL", "https://mod.bsky.app", "MOD_SERVICE_RPS", 5),
+    modServiceDid: process.env.MOD_SERVICE_DID ?? BSKY_MOD_DID,
     /** Limits each PDS host separately. */
     pdsHosts: new HostLimiters(num("PDS_RPS", 5)),
   };

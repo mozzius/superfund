@@ -13,6 +13,7 @@ function makeStore(overrides: Partial<AuditStoreOptions> = {}) {
     evaluationTtlMs: 30 * DAY,
     candidateTtlMs: 7 * DAY,
     maxPendingTakedowns: 2,
+    takedownDedupMs: 30 * DAY,
     now: () => now,
     ...overrides,
   });
@@ -56,18 +57,52 @@ test("account events record takedowns but only update known DIDs on reactivation
   assert.equal(store.getStatuses(["did:bad"]).get("did:bad"), "active");
 });
 
+test("forgetStatus drops a cached status", () => {
+  const { store } = makeStore();
+  store.setStatuses([["did:t", "takendown"]]);
+  store.forgetStatus("did:t");
+  assert.equal(store.getStatuses(["did:t"]).size, 0);
+});
+
 test("pending takedowns dedup, cap, and come out oldest first", () => {
   const { store, advance } = makeStore();
-  assert.equal(store.addPendingTakedown("did:t1"), true);
-  assert.equal(store.addPendingTakedown("did:t1"), false);
+  assert.equal(store.addPendingTakedown("did:t1"), "queued");
+  assert.equal(store.addPendingTakedown("did:t1"), "duplicate");
   advance(1);
   store.addPendingTakedown("did:t2");
-  assert.equal(store.addPendingTakedown("did:t3"), false, "full");
+  assert.equal(store.addPendingTakedown("did:t3"), "dropped", "full");
   assert.equal(store.pendingTakedowns, 2);
   assert.equal(store.takePendingTakedown(), "did:t1");
   assert.equal(store.takePendingTakedown(), "did:t2");
   assert.equal(store.takePendingTakedown(), undefined);
   assert.equal(store.pendingTakedowns, 0);
+});
+
+test("a takedown fans out once per dedup window, even after it left the queue", () => {
+  const { store, advance } = makeStore();
+  assert.equal(store.addPendingTakedown("did:t"), "queued");
+  assert.equal(store.takePendingTakedown(), "did:t");
+  advance(DAY);
+  assert.equal(store.addPendingTakedown("did:t"), "duplicate", "reported again by the other source");
+  assert.equal(store.pendingTakedowns, 0);
+  advance(30 * DAY);
+  assert.equal(store.addPendingTakedown("did:t"), "queued", "a takedown after the window counts again");
+});
+
+test("a dropped takedown can still be queued later", () => {
+  const { store } = makeStore({ maxPendingTakedowns: 1 });
+  store.addPendingTakedown("did:t1");
+  assert.equal(store.addPendingTakedown("did:t2"), "dropped");
+  store.takePendingTakedown();
+  assert.equal(store.addPendingTakedown("did:t2"), "queued");
+});
+
+test("prune forgets takedown triggers after the dedup window", () => {
+  const { store, advance } = makeStore();
+  store.addPendingTakedown("did:t");
+  store.takePendingTakedown();
+  advance(31 * DAY);
+  assert.equal(store.prune(), 1);
 });
 
 test("candidates come out highest-hits first, once they reach the threshold", () => {
@@ -145,9 +180,11 @@ test("dashboard queries rank by share taken down", () => {
   assert.deepEqual(store.bucketCounts("follows"), { 0: 1, 1: 1, 30: 1 });
 });
 
-test("cursor round-trips", () => {
+test("cursors round-trip, keyed by stream", () => {
   const { store } = makeStore();
   assert.equal(store.loadCursor(), undefined);
   store.saveCursor(12345);
+  store.saveCursor(678, "mod_labels_cursor");
   assert.equal(store.loadCursor(), 12345);
+  assert.equal(store.loadCursor("mod_labels_cursor"), 678);
 });

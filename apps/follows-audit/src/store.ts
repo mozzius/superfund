@@ -5,9 +5,9 @@ import type { AuditDirection } from "labeller-client";
 
 /**
  * Account status as we know it. "active" means the AppView returned a profile
- * or the relay said active; anything else is the relay's status string
- * (takendown, suspended, deleted, deactivated, ...), or "not-found" if the
- * relay has never heard of the DID.
+ * or the relay said active. "takendown" / "suspended" can also come from a
+ * Bluesky mod label. Anything else is the relay's status string (deleted,
+ * deactivated, ...), or "not-found" if the relay has never heard of the DID.
  */
 export type AccountStatus = string;
 
@@ -40,10 +40,14 @@ export interface AuditStoreOptions {
   candidateTtlMs: number;
   /** Cap on takedowns waiting for their followers to be fetched. */
   maxPendingTakedowns: number;
+  /** An account's takedown is fanned out at most once per this window. */
+  takedownDedupMs: number;
   now?: () => number;
 }
 
 const CURSOR_KEY = "jetstream_cursor";
+
+export type TakedownQueueResult = "queued" | "duplicate" | "dropped";
 
 export class AuditStore {
   readonly #db: DatabaseSync;
@@ -59,8 +63,11 @@ export class AuditStore {
   readonly #upsertEvaluation;
   readonly #selectDueRelabel;
   readonly #touchEvaluation;
+  readonly #deleteStatus;
   readonly #insertPendingTakedown;
   readonly #popPendingTakedown;
+  readonly #selectTrigger;
+  readonly #upsertTrigger;
   readonly #addHit;
   readonly #selectCandidate;
   readonly #deleteCandidate;
@@ -102,6 +109,14 @@ export class AuditStore {
         taken_down_at_ms INTEGER NOT NULL
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS pending_takedowns_by_time ON pending_takedowns (taken_down_at_ms);
+
+      -- When each account's takedown was last queued, so one takedown reported
+      -- by both the firehose and the mod label stream only fans out once.
+      CREATE TABLE IF NOT EXISTS takedown_triggers (
+        did TEXT PRIMARY KEY,
+        triggered_at_ms INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS takedown_triggers_by_time ON takedown_triggers (triggered_at_ms);
 
       -- Followers of taken-down accounts, scored by how many takedowns they follow.
       CREATE TABLE IF NOT EXISTS candidates (
@@ -149,6 +164,14 @@ export class AuditStore {
     this.#touchEvaluation = this.#db.prepare(
       "UPDATE evaluations SET evaluated_at_ms = ? WHERE did = ? AND direction = ?",
     );
+    this.#deleteStatus = this.#db.prepare("DELETE FROM account_status WHERE did = ?");
+    this.#selectTrigger = this.#db.prepare(
+      "SELECT triggered_at_ms FROM takedown_triggers WHERE did = ?",
+    );
+    this.#upsertTrigger = this.#db.prepare(`
+      INSERT INTO takedown_triggers (did, triggered_at_ms) VALUES (?, ?)
+      ON CONFLICT (did) DO UPDATE SET triggered_at_ms = excluded.triggered_at_ms
+    `);
     this.#insertPendingTakedown = this.#db.prepare(
       "INSERT OR IGNORE INTO pending_takedowns (did, taken_down_at_ms) VALUES (?, ?)",
     );
@@ -207,6 +230,11 @@ export class AuditStore {
     this.#transaction(() => {
       for (const [did, status] of entries) this.#upsertStatus.run(did, status, now);
     });
+  }
+
+  /** Forget an account's cached status, so the next audit looks it up fresh. */
+  forgetStatus(did: string): void {
+    this.#deleteStatus.run(did);
   }
 
   /**
@@ -305,12 +333,23 @@ export class AuditStore {
 
   // --- Takedowns waiting for a backlinks lookup.
 
-  /** Returns false if it was already pending or the backlog is full. */
-  addPendingTakedown(did: string): boolean {
-    if (this.#pendingTakedowns >= this.#opts.maxPendingTakedowns) return false;
-    const changes = Number(this.#insertPendingTakedown.run(did, this.#now()).changes);
+  /**
+   * Queue a takedown for fan-out. "duplicate" if this account's takedown was
+   * already queued within the dedup window (the firehose and the mod label
+   * stream both report most takedowns); "dropped" if the backlog is full.
+   */
+  addPendingTakedown(did: string): TakedownQueueResult {
+    const now = this.#now();
+    const prev = this.#selectTrigger.get(did) as { triggered_at_ms: number } | undefined;
+    if (prev && Number(prev.triggered_at_ms) > now - this.#opts.takedownDedupMs) return "duplicate";
+    if (this.#pendingTakedowns >= this.#opts.maxPendingTakedowns) return "dropped";
+    let changes = 0;
+    this.#transaction(() => {
+      changes = Number(this.#insertPendingTakedown.run(did, now).changes);
+      this.#upsertTrigger.run(did, now);
+    });
     this.#pendingTakedowns += changes;
-    return changes > 0;
+    return changes > 0 ? "queued" : "duplicate";
   }
 
   takePendingTakedown(): string | undefined {
@@ -350,17 +389,18 @@ export class AuditStore {
 
   // --- Misc.
 
-  loadCursor(): number | undefined {
-    const row = this.#selectMetadata.get(CURSOR_KEY) as { value: string } | undefined;
+  /** A stream cursor (the Jetstream one unless `key` says otherwise). */
+  loadCursor(key = CURSOR_KEY): number | undefined {
+    const row = this.#selectMetadata.get(key) as { value: string } | undefined;
     const cursor = Number(row?.value);
     return row && Number.isFinite(cursor) ? cursor : undefined;
   }
 
-  saveCursor(cursor: number): void {
-    this.#upsertMetadata.run(CURSOR_KEY, String(cursor));
+  saveCursor(cursor: number, key = CURSOR_KEY): void {
+    this.#upsertMetadata.run(key, String(cursor));
   }
 
-  /** Drop stale cache rows, expired evaluations and cold candidates. Returns rows deleted. */
+  /** Drop stale cache rows, expired evaluations, cold candidates and old triggers. Returns rows deleted. */
   prune(): number {
     const now = this.#now();
     const run = (sql: string, arg: number) => Number(this.#db.prepare(sql).run(arg).changes);
@@ -374,7 +414,11 @@ export class AuditStore {
         now - this.#opts.inactiveTtlMs,
       ) +
       run("DELETE FROM evaluations WHERE evaluated_at_ms <= ?", now - this.#opts.evaluationTtlMs) +
-      run("DELETE FROM candidates WHERE last_hit_ms <= ?", now - this.#opts.candidateTtlMs)
+      run("DELETE FROM candidates WHERE last_hit_ms <= ?", now - this.#opts.candidateTtlMs) +
+      run(
+        "DELETE FROM takedown_triggers WHERE triggered_at_ms <= ?",
+        now - this.#opts.takedownDedupMs,
+      )
     );
   }
 

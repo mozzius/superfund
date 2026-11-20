@@ -3,8 +3,8 @@ import { chooseBucket, labelForBucket } from "./bucket.ts";
 import type { GraphSample } from "./sources.ts";
 import type { AccountStatus, AuditStore } from "./store.ts";
 
-/** Statuses counted as "taken down". Add "suspended" here to include temporary suspensions. */
-export const TAKEDOWN_STATUSES: ReadonlySet<string> = new Set(["takendown"]);
+/** Statuses counted as "taken down". Suspensions are temporary takedowns, so they count. */
+export const TAKEDOWN_STATUSES: ReadonlySet<string> = new Set(["takendown", "suspended"]);
 
 /**
  * Statuses left out of the denominator: these aren't really in the graph any
@@ -18,6 +18,8 @@ export interface AuditDeps {
   /** Most recent follows (or followers) of `did`, up to `limit`. */
   sample(direction: AuditDirection, did: string, limit: number): Promise<GraphSample>;
   visibleProfiles(dids: string[]): Promise<Set<string>>;
+  /** Which of these (max 25) Bluesky's mod service has labelled taken down or suspended. */
+  modTakedowns(dids: string[]): Promise<Map<string, AccountStatus>>;
   repoStatus(did: string): Promise<AccountStatus>;
   /** Make `label` the only active label of this direction's family (null clears it). */
   setLabel(did: string, direction: AuditDirection, label: string | null): Promise<void>;
@@ -42,6 +44,8 @@ export interface AuditResult {
   label: string | null;
   labelCall: "set" | "clear" | "none";
   cacheHits: number;
+  /** Statuses that came from a mod service label. */
+  modLabelled: number;
   relayLookups: number;
   skipped?: "small-sample";
 }
@@ -59,13 +63,21 @@ export async function evaluateAccount(
   const base = { did, direction, total: sample.total, sampled: sample.dids.length, previousBucket };
 
   if (sample.dids.length < opts.minCounted) {
-    return finish(deps, base, { counted: 0, takendown: 0, percent: null, cacheHits: 0, relayLookups: 0 }, "small-sample");
+    return finish(
+      deps,
+      base,
+      { counted: 0, takendown: 0, percent: null, cacheHits: 0, modLabelled: 0, relayLookups: 0 },
+      "small-sample",
+    );
   }
 
   const statuses = deps.store.getStatuses(sample.dids);
   const cacheHits = statuses.size;
   const unknown = sample.dids.filter((d) => !statuses.has(d));
 
+  // Visible on the AppView: active. Hidden: Bluesky's mod labels first (they
+  // also cover appview-only takedowns), then the relay for the rest.
+  let modLabelled = 0;
   let relayLookups = 0;
   for (let i = 0; i < unknown.length; i += 25) {
     const chunk = unknown.slice(i, i + 25);
@@ -76,9 +88,24 @@ export async function evaluateAccount(
       resolved.push([d, "active"]);
       return false;
     });
-    relayLookups += hidden.length;
+    let labelled = new Map<string, AccountStatus>();
+    if (hidden.length > 0) {
+      try {
+        labelled = await deps.modTakedowns(hidden);
+      } catch (err) {
+        console.warn(`[audit] mod label lookup failed, asking the relay instead`, err);
+      }
+    }
+    const forRelay = hidden.filter((d) => {
+      const status = labelled.get(d);
+      if (!status) return true;
+      resolved.push([d, status]);
+      modLabelled++;
+      return false;
+    });
+    relayLookups += forRelay.length;
     const hiddenStatuses = await Promise.all(
-      hidden.map(async (d): Promise<[string, AccountStatus]> => {
+      forRelay.map(async (d): Promise<[string, AccountStatus]> => {
         try {
           return [d, await deps.repoStatus(d)];
         } catch (err) {
@@ -101,7 +128,7 @@ export async function evaluateAccount(
     if (TAKEDOWN_STATUSES.has(status)) takendown++;
   }
 
-  const counts = { counted, takendown, cacheHits, relayLookups };
+  const counts = { counted, takendown, cacheHits, modLabelled, relayLookups };
   if (counted < opts.minCounted) {
     return finish(deps, base, { ...counts, percent: null }, "small-sample");
   }
@@ -111,7 +138,10 @@ export async function evaluateAccount(
 async function finish(
   deps: AuditDeps,
   base: Pick<AuditResult, "did" | "direction" | "total" | "sampled" | "previousBucket">,
-  counts: Pick<AuditResult, "counted" | "takendown" | "percent" | "cacheHits" | "relayLookups">,
+  counts: Pick<
+    AuditResult,
+    "counted" | "takendown" | "percent" | "cacheHits" | "modLabelled" | "relayLookups"
+  >,
   skipped?: AuditResult["skipped"],
 ): Promise<AuditResult> {
   const family = TAKEDOWN_LABEL_FAMILIES[base.direction];

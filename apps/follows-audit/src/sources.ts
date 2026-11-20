@@ -1,3 +1,6 @@
+import { takedownsFromLabels, type Label } from "./mod-labels.ts";
+import type { AccountStatus } from "./store.ts";
+
 const USER_AGENT = "superfund-follows-audit/1.0 (atproto labeler)";
 
 /** Spaces requests to one host at a fixed rate; a 429 pauses the host. */
@@ -201,7 +204,7 @@ export async function fetchFollowsSample(
 /**
  * Which of these DIDs the AppView still shows a profile for (max 25). The
  * AppView hides taken-down, suspended, deactivated and deleted accounts, so
- * this is the cheap batch filter before per-account relay lookups.
+ * this is the cheap batch filter before mod label and relay lookups.
  */
 export async function fetchVisibleProfiles(appview: Upstream, dids: string[]): Promise<Set<string>> {
   if (dids.length === 0) return new Set();
@@ -215,6 +218,41 @@ export async function fetchVisibleProfiles(appview: Upstream, dids: string[]): P
     "appview",
   );
   return new Set((data.profiles ?? []).map((p) => p.did));
+}
+
+/**
+ * Which of these DIDs (max 25) the moderation service `modDid` has taken
+ * down or suspended, from its `!takedown` / `!suspend` account labels. This
+ * catches appview-only takedowns, which the relay still reports as active.
+ */
+export async function fetchModTakedowns(
+  mod: Upstream,
+  modDid: string,
+  dids: string[],
+): Promise<Map<string, AccountStatus>> {
+  // Ozone rejects wildcard patterns; a DID never contains "*" anyway.
+  const subjects = dids.filter((d) => !d.includes("*"));
+  if (subjects.length === 0) return new Map();
+  if (subjects.length > 25) throw new Error("fetchModTakedowns takes at most 25 DIDs");
+  const PAGE = 250;
+  const labels: Label[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 10; page++) {
+    const params = new URLSearchParams({ sources: modDid, limit: String(PAGE) });
+    for (const did of subjects) params.append("uriPatterns", did);
+    if (cursor) params.set("cursor", cursor);
+    const data = await getJson<{ labels?: Label[]; cursor?: string }>(
+      mod,
+      "/xrpc/com.atproto.label.queryLabels",
+      params,
+      "mod",
+    );
+    const got = data.labels ?? [];
+    labels.push(...got);
+    if (got.length < PAGE || !data.cursor) break;
+    cursor = data.cursor;
+  }
+  return takedownsFromLabels(labels, modDid, Date.now());
 }
 
 /** The relay's view of an account: "active", its status string, or "not-found". */

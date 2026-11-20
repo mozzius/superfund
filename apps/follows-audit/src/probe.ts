@@ -11,6 +11,7 @@ import { loadConfig } from "./config.ts";
 import {
   fetchFollowerSample,
   fetchFollowsSample,
+  fetchModTakedowns,
   fetchRepoStatus,
   fetchVisibleProfiles,
   getJson,
@@ -26,6 +27,7 @@ const store = new AuditStore({
   evaluationTtlMs: config.labelExpiryMs,
   candidateTtlMs: config.candidateTtlMs,
   maxPendingTakedowns: 1,
+  takedownDedupMs: config.takedownDedupMs,
 });
 
 const args = process.argv.slice(2);
@@ -56,6 +58,7 @@ for (const target of targets) {
             ? fetchFollowsSample(config.plc, config.pdsHosts, d, limit)
             : fetchFollowerSample(config.constellation, d, limit),
         visibleProfiles: (dids) => fetchVisibleProfiles(config.appview, dids),
+        modTakedowns: (dids) => fetchModTakedowns(config.modService, config.modServiceDid, dids),
         repoStatus: (d) => fetchRepoStatus(config.relay, d),
         setLabel: async () => {},
       },
@@ -65,7 +68,7 @@ for (const target of targets) {
       `${target} [${direction}]: ${r.skipped ? `skipped (${r.skipped}) ` : ""}` +
         `total=${r.total} sampled=${r.sampled} counted=${r.counted} takendown=${r.takendown} ` +
         `pct=${r.percent?.toFixed(2) ?? "-"} label=${r.label ?? "none"} ` +
-        `relayLookups=${r.relayLookups} in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+        `modLabelled=${r.modLabelled} relayLookups=${r.relayLookups} in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
     );
   } catch (err) {
     console.log(`${target} [${direction}]: failed — ${String(err).slice(0, 160)}`);

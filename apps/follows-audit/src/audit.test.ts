@@ -7,7 +7,13 @@ import { AuditStore } from "./store.ts";
 const DAY = 86_400_000;
 const opts = { sampleSize: 1000, minCounted: 50 };
 
-function setup(accounts: Record<string, string>) {
+/**
+ * `accounts` maps DID -> status. "active" accounts are visible on the AppView;
+ * the rest are hidden and the relay returns their status, except
+ * "label:<status>" ones: the relay says active (an appview-only takedown) and
+ * only the mod label knows.
+ */
+function setup(accounts: Record<string, string>, { modDown = false } = {}) {
   const store = new AuditStore({
     dbPath: ":memory:",
     activeTtlMs: 7 * DAY,
@@ -15,9 +21,11 @@ function setup(accounts: Record<string, string>) {
     evaluationTtlMs: 30 * DAY,
     candidateTtlMs: 14 * DAY,
     maxPendingTakedowns: 100,
+    takedownDedupMs: 30 * DAY,
   });
   const calls = {
     profiles: 0,
+    mod: 0,
     relay: 0,
     samples: [] as AuditDirection[],
     labels: [] as [AuditDirection, string | null][],
@@ -33,11 +41,22 @@ function setup(accounts: Record<string, string>) {
       calls.profiles++;
       return new Set(dids.filter((d) => accounts[d] === "active"));
     },
+    modTakedowns: async (dids) => {
+      calls.mod++;
+      assert.ok(dids.length <= 25);
+      if (modDown) throw new Error("mod service down");
+      const out = new Map<string, string>();
+      for (const d of dids) {
+        const s = accounts[d]!;
+        if (s.startsWith("label:")) out.set(d, s.slice("label:".length));
+      }
+      return out;
+    },
     repoStatus: async (did) => {
       calls.relay++;
       const s = accounts[did]!;
       if (s === "boom") throw new Error("relay down");
-      return s;
+      return s.startsWith("label:") ? "active" : s;
     },
     setLabel: async (_did, direction, label) => {
       calls.labels.push([direction, label]);
@@ -67,7 +86,39 @@ test("computes the takendown share, excluding deleted accounts", async () => {
   assert.equal(r.label, "follows-takendown-twenty");
   assert.deepEqual(calls.labels, [["follows", "follows-takendown-twenty"]]);
   assert.equal(calls.profiles, 60, "1500 accounts in batches of 25");
+  assert.equal(calls.mod, 32, "one label lookup per batch with hidden accounts");
   assert.equal(calls.relay, 800, "only hidden accounts hit the relay");
+});
+
+test("suspended accounts count as taken down", async () => {
+  const { deps } = setup(makeAccounts({ active: 850, takendown: 100, suspended: 50 }));
+  const r = await evaluateAccount("did:plc:target", "follows", deps, opts);
+  assert.equal(r.counted, 1000);
+  assert.equal(r.takendown, 150);
+});
+
+test("mod labels catch appview-only takedowns and skip the relay for them", async () => {
+  const { deps, calls, store } = setup(
+    makeAccounts({ active: 800, takendown: 50, "label:takendown": 100, "label:suspended": 50 }),
+  );
+  const r = await evaluateAccount("did:plc:target", "follows", deps, opts);
+  assert.equal(r.counted, 1000);
+  assert.equal(r.takendown, 200);
+  assert.equal(r.modLabelled, 150);
+  assert.equal(r.relayLookups, 50);
+  assert.equal(calls.relay, 50);
+  assert.equal(store.getStatuses(["did:plc:f850"]).get("did:plc:f850"), "takendown", "cached");
+});
+
+test("a mod label outage falls back to the relay", async () => {
+  const { deps, calls } = setup(makeAccounts({ active: 800, takendown: 100, "label:takendown": 100 }), {
+    modDown: true,
+  });
+  const r = await evaluateAccount("did:plc:target", "follows", deps, opts);
+  assert.equal(r.counted, 1000);
+  assert.equal(r.takendown, 100, "appview-only takedowns look active to the relay");
+  assert.equal(r.modLabelled, 0);
+  assert.equal(calls.relay, 200);
 });
 
 test("uses the family for the direction", async () => {

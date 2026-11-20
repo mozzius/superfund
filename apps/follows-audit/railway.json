@@ -3,18 +3,20 @@
   "build": {
     "builder": "RAILPACK",
     "watchPatterns": [
-      "/apps/follower-audit/**",
+      "/apps/follows-audit/**",
       "/packages/labeller-client/**",
       "/pnpm-lock.yaml"
     ]
   },
   "deploy": {
-    "startCommand": "pnpm -F follower-audit start",
+    "startCommand": "pnpm -F follows-audit start",
     "restartPolicyType": "ON_FAILURE",
     "limitOverride": {
       "containers": {
         "memoryBytes": 500000000
       }
-    }
+    },
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 120
   }
 }

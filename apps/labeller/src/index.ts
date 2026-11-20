@@ -37,12 +37,12 @@ const internalPort = Number(process.env.INTERNAL_PORT ?? 14832);
  * Type: Posts
  * Severity: Informational
  *
- * Account labels set by apps/follower-audit (share of an account's recent
- * followers that have been taken down). At most one is active per account.
+ * Account labels set by apps/follows-audit (share of the accounts an account
+ * follows that have been taken down). At most one is active per account.
  * Declared with `pnpm -F labeller label-defs`; see scripts/add-label-defs.ts.
  *
- * ID: `followers-takendown-ten` / `-twenty` / `-thirty` / `-forty` / `-fifty`
- * Name: 10–20% … 50%+ of followers taken down
+ * ID: `follows-takendown-one` / `-five` / `-ten` / `-twenty` / `-thirty` / `-forty` / `-fifty`
+ * Name: 1–5% … 50%+ of follows taken down
  * Type: Accounts
  * Severity: Informational
  */

@@ -11,7 +11,7 @@ importers:
 
   .: {}
 
-  apps/follower-audit:
+  apps/follows-audit:
     dependencies:
       '@skyware/jetstream':
         specifier: ^0.2.5

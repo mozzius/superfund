@@ -1,5 +1,5 @@
 {
-  "name": "follower-audit",
+  "name": "follows-audit",
   "version": "0.0.0",
   "private": true,
   "type": "module",

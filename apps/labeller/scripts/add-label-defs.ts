@@ -1,7 +1,8 @@
 /**
- * Adds (or updates) the follower-takedown label definitions on the labeler's
- * app.bsky.labeler.service record. Existing definitions with other
- * identifiers are left untouched, as is the rest of the record.
+ * Adds (or updates) the follows-takendown label definitions on the labeler's
+ * app.bsky.labeler.service record, and removes the retired
+ * followers-takendown-* ones if they were ever declared. Other definitions
+ * and the rest of the record are left untouched.
  *
  *   LABELER_IDENTIFIER=labeler.example.com LABELER_PASSWORD=xxxx \
  *     pnpm -F labeller label-defs [--dry-run]
@@ -9,7 +10,7 @@
  * LABELER_IDENTIFIER defaults to LABELER_DID. An app password works.
  * LABELER_PDS defaults to https://bsky.social.
  */
-import { FOLLOWER_TAKEDOWN_LABELS } from "labeller-client";
+import { FOLLOWS_TAKEDOWN_LABELS } from "labeller-client";
 
 interface LabelValueDefinition {
   identifier: string;
@@ -20,13 +21,14 @@ interface LabelValueDefinition {
   locales: { lang: string; name: string; description: string }[];
 }
 
-const DISCLAIMER =
-  "Spam accounts often follow people without their involvement, so this is not " +
-  "necessarily anything the account did. Based on a sample of up to 1,000 of the " +
-  "account's most recent followers, re-checked every couple of weeks.";
+const RETIRED_PREFIX = "followers-takendown-";
 
-const definitions: LabelValueDefinition[] = FOLLOWER_TAKEDOWN_LABELS.map((label, i) => {
-  const next = FOLLOWER_TAKEDOWN_LABELS[i + 1];
+const FOOTNOTE =
+  "Based on up to 1,000 of the accounts it most recently followed, re-checked regularly. " +
+  "Following someone isn't endorsing them, and follow-back habits can push this up.";
+
+const definitions: LabelValueDefinition[] = FOLLOWS_TAKEDOWN_LABELS.map((label, i) => {
+  const next = FOLLOWS_TAKEDOWN_LABELS[i + 1];
   const range = next ? `${label.minPercent}–${next.minPercent}%` : `${label.minPercent}%+`;
   const share = next
     ? `Between ${label.minPercent}% and ${next.minPercent}%`
@@ -40,8 +42,9 @@ const definitions: LabelValueDefinition[] = FOLLOWER_TAKEDOWN_LABELS.map((label,
     locales: [
       {
         lang: "en",
-        name: `${range} of followers taken down`,
-        description: `${share} of this account's recent followers have been taken down by moderation. ${DISCLAIMER}`,
+        name: `${range} of follows taken down`,
+        description:
+          `${share} of the accounts this account follows have been taken down by moderation. ${FOOTNOTE}`,
       },
     ],
   };
@@ -100,16 +103,22 @@ const record = existing.value;
 const oldDefs: LabelValueDefinition[] = record.policies?.labelValueDefinitions ?? [];
 const oldValues: string[] = record.policies?.labelValues ?? [];
 const newIds = new Set(definitions.map((d) => d.identifier));
+const keep = (id: string) => !newIds.has(id) && !id.startsWith(RETIRED_PREFIX);
 
-const mergedDefs = [...oldDefs.filter((d) => !newIds.has(d.identifier)), ...definitions];
-const mergedValues = [...new Set([...oldValues, ...definitions.map((d) => d.identifier)])];
+const mergedDefs = [...oldDefs.filter((d) => keep(d.identifier)), ...definitions];
+const mergedValues = [
+  ...new Set([...oldValues.filter(keep), ...definitions.map((d) => d.identifier)]),
+];
 
 console.log(`labeler ${session.did} on ${pds}`);
 for (const d of definitions) {
   const verb = oldDefs.some((o) => o.identifier === d.identifier) ? "update" : "add   ";
   console.log(`  ${verb} ${d.identifier}  "${d.locales[0]!.name}"`);
 }
-const kept = oldDefs.filter((d) => !newIds.has(d.identifier)).map((d) => d.identifier);
+for (const d of oldDefs.filter((o) => o.identifier.startsWith(RETIRED_PREFIX))) {
+  console.log(`  remove ${d.identifier}`);
+}
+const kept = oldDefs.filter((d) => keep(d.identifier)).map((d) => d.identifier);
 console.log(`  keep   ${kept.join(", ") || "(none)"}`);
 
 if (dryRun) {

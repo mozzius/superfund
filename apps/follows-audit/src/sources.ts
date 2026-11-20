@@ -1,4 +1,4 @@
-const USER_AGENT = "superfund-follower-audit/1.0 (atproto labeler)";
+const USER_AGENT = "superfund-follows-audit/1.0 (atproto labeler)";
 
 /** Spaces requests to one host at a fixed rate; a 429 pauses the host. */
 export class RateLimiter {
@@ -86,10 +86,30 @@ export async function getJson<T>(
   }
 }
 
-export interface FollowerSample {
-  /** Total distinct followers Constellation knows about (undercounts old follows). */
+/** Per-host rate limiters, created on first use (one per PDS, say). */
+export class HostLimiters {
+  readonly #rps: number;
+  readonly #limiters = new Map<string, RateLimiter>();
+
+  constructor(requestsPerSecond: number) {
+    this.#rps = requestsPerSecond;
+  }
+
+  upstream(baseUrl: string): Upstream {
+    const host = new URL(baseUrl).host;
+    let limiter = this.#limiters.get(host);
+    if (!limiter) {
+      limiter = new RateLimiter(this.#rps);
+      this.#limiters.set(host, limiter);
+    }
+    return { baseUrl, limiter };
+  }
+}
+
+export interface GraphSample {
+  /** Size of the list the sample came from, as far as the source knows. */
   total: number;
-  /** Most recent followers first, deduplicated. */
+  /** Most recent first, deduplicated, without the account itself. */
   dids: string[];
 }
 
@@ -98,7 +118,7 @@ export async function fetchFollowerSample(
   constellation: Upstream,
   did: string,
   limit: number,
-): Promise<FollowerSample> {
+): Promise<GraphSample> {
   const data = await getJson<{ total?: number; linking_dids?: string[] }>(
     constellation,
     "/links/distinct-dids",
@@ -112,6 +132,70 @@ export async function fetchFollowerSample(
   );
   const dids = [...new Set((data.linking_dids ?? []).filter((d) => d !== did))];
   return { total: Number(data.total ?? dids.length), dids };
+}
+
+/** The account's PDS endpoint from its DID document (did:plc or did:web). */
+export async function resolvePds(plc: Upstream, hosts: HostLimiters, did: string): Promise<string> {
+  type DidDoc = { service?: { id: string; type?: string; serviceEndpoint?: unknown }[] };
+  let doc: DidDoc;
+  if (did.startsWith("did:plc:")) {
+    doc = await getJson<DidDoc>(plc, `/${encodeURIComponent(did)}`, new URLSearchParams(), "plc");
+  } else if (did.startsWith("did:web:")) {
+    const host = decodeURIComponent(did.slice("did:web:".length));
+    doc = await getJson<DidDoc>(
+      hosts.upstream(`https://${host}`),
+      "/.well-known/did.json",
+      new URLSearchParams(),
+      "didweb",
+    );
+  } else {
+    throw new Error(`unsupported DID method: ${did}`);
+  }
+  const service = doc.service?.find(
+    (s) => s.id === "#atproto_pds" || s.id === `${did}#atproto_pds`,
+  );
+  if (typeof service?.serviceEndpoint !== "string") throw new Error(`no PDS in DID doc for ${did}`);
+  return service.serviceEndpoint;
+}
+
+/**
+ * Up to `limit` of the accounts `did` most recently followed, read straight
+ * from its repo. Unlike the AppView's getFollows this still lists accounts
+ * that have since been taken down.
+ */
+export async function fetchFollowsSample(
+  plc: Upstream,
+  hosts: HostLimiters,
+  did: string,
+  limit: number,
+): Promise<GraphSample> {
+  const pds = hosts.upstream(await resolvePds(plc, hosts, did));
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const params = new URLSearchParams({
+      repo: did,
+      collection: "app.bsky.graph.follow",
+      limit: "100",
+    });
+    if (cursor) params.set("cursor", cursor);
+    const page = await getJson<{ records?: { value?: { subject?: unknown } }[]; cursor?: string }>(
+      pds,
+      "/xrpc/com.atproto.repo.listRecords",
+      params,
+      "pds",
+    );
+    const records = page.records ?? [];
+    for (const r of records) {
+      const subject = r.value?.subject;
+      if (typeof subject === "string" && subject.startsWith("did:") && subject !== did) {
+        seen.add(subject);
+      }
+    }
+    cursor = records.length ? page.cursor : undefined;
+  } while (cursor && seen.size < limit);
+  const dids = [...seen].slice(0, limit);
+  return { total: dids.length, dids };
 }
 
 /**

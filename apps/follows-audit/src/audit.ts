@@ -1,68 +1,65 @@
-import type { FollowerTakedownLabel } from "labeller-client";
+import { TAKEDOWN_LABEL_FAMILIES, type AuditDirection } from "labeller-client";
 import { chooseBucket, labelForBucket } from "./bucket.ts";
-import type { FollowerSample } from "./sources.ts";
+import type { GraphSample } from "./sources.ts";
 import type { AccountStatus, AuditStore } from "./store.ts";
 
 /** Statuses counted as "taken down". Add "suspended" here to include temporary suspensions. */
 export const TAKEDOWN_STATUSES: ReadonlySet<string> = new Set(["takendown"]);
 
 /**
- * Statuses left out of the denominator: these aren't really followers any
+ * Statuses left out of the denominator: these aren't really in the graph any
  * more (or we couldn't tell). Deactivated accounts stay in — they're real
- * followers who stepped away.
+ * accounts that stepped away.
  */
 const UNCOUNTED_STATUSES: ReadonlySet<string> = new Set(["deleted", "not-found", "unknown"]);
 
 export interface AuditDeps {
   store: Pick<AuditStore, "getStatuses" | "setStatuses" | "getEvaluation" | "saveEvaluation">;
-  followerSample(did: string, limit: number): Promise<FollowerSample>;
+  /** Most recent follows (or followers) of `did`, up to `limit`. */
+  sample(direction: AuditDirection, did: string, limit: number): Promise<GraphSample>;
   visibleProfiles(dids: string[]): Promise<Set<string>>;
   repoStatus(did: string): Promise<AccountStatus>;
-  setLabel(did: string, label: FollowerTakedownLabel | null): Promise<void>;
+  /** Make `label` the only active label of this direction's family (null clears it). */
+  setLabel(did: string, direction: AuditDirection, label: string | null): Promise<void>;
 }
 
 export interface AuditOptions {
   sampleSize: number;
-  /** Skip accounts with fewer followers than this (percentages are noise). */
-  minFollowers: number;
-  /** Need at least this many countable followers in the sample. */
+  /** Need at least this many countable accounts in the sample (percentages are noise below). */
   minCounted: number;
 }
 
 export interface AuditResult {
   did: string;
-  followers: number;
+  direction: AuditDirection;
+  total: number;
   sampled: number;
   counted: number;
   takendown: number;
   percent: number | null;
   previousBucket: number | null;
   bucket: number;
-  label: FollowerTakedownLabel | null;
+  label: string | null;
   labelCall: "set" | "clear" | "none";
   cacheHits: number;
   relayLookups: number;
-  skipped?: "few-followers" | "small-sample";
+  skipped?: "small-sample";
 }
 
 export async function evaluateAccount(
   did: string,
+  direction: AuditDirection,
   deps: AuditDeps,
   opts: AuditOptions,
 ): Promise<AuditResult> {
-  const previous = deps.store.getEvaluation(did);
+  const previous = deps.store.getEvaluation(did, direction);
   const previousBucket = previous ? previous.bucket : null;
 
-  const sample = await deps.followerSample(did, opts.sampleSize);
-  const base = {
-    did,
-    followers: sample.total,
-    sampled: sample.dids.length,
-    previousBucket,
-  };
+  const sample = await deps.sample(direction, did, opts.sampleSize);
+  const base = { did, direction, total: sample.total, sampled: sample.dids.length, previousBucket };
 
-  if (sample.total < opts.minFollowers || sample.dids.length < opts.minCounted) {
-    return finish(deps, base, { counted: 0, takendown: 0, percent: null, cacheHits: 0, relayLookups: 0 }, "few-followers");
+  if (sample.dids.length < opts.minCounted) {
+    return finish(deps, base, { counted: 0, takendown: 0, percent: null, cacheHits: 0, relayLookups: 0 }, "small-sample");
   }
 
   const statuses = deps.store.getStatuses(sample.dids);
@@ -104,38 +101,37 @@ export async function evaluateAccount(
     if (TAKEDOWN_STATUSES.has(status)) takendown++;
   }
 
+  const counts = { counted, takendown, cacheHits, relayLookups };
   if (counted < opts.minCounted) {
-    return finish(deps, base, { counted, takendown, percent: null, cacheHits, relayLookups }, "small-sample");
+    return finish(deps, base, { ...counts, percent: null }, "small-sample");
   }
-  return finish(deps, base, {
-    counted,
-    takendown,
-    percent: (takendown / counted) * 100,
-    cacheHits,
-    relayLookups,
-  });
+  return finish(deps, base, { ...counts, percent: (takendown / counted) * 100 });
 }
 
 async function finish(
   deps: AuditDeps,
-  base: Pick<AuditResult, "did" | "followers" | "sampled" | "previousBucket">,
+  base: Pick<AuditResult, "did" | "direction" | "total" | "sampled" | "previousBucket">,
   counts: Pick<AuditResult, "counted" | "takendown" | "percent" | "cacheHits" | "relayLookups">,
   skipped?: AuditResult["skipped"],
 ): Promise<AuditResult> {
+  const family = TAKEDOWN_LABEL_FAMILIES[base.direction];
   const bucket =
-    counts.percent === null ? 0 : chooseBucket(counts.percent, base.previousBucket);
-  const label = labelForBucket(bucket);
+    counts.percent === null
+      ? 0
+      : chooseBucket(family, counts.percent, base.previousBucket, counts.counted);
+  const label = labelForBucket(family, bucket);
 
   // Re-send an active label every time (the labeller only re-issues it when the
   // expiry needs pushing out); only send a clear if we previously labelled.
   let labelCall: AuditResult["labelCall"] = "none";
   if (label) labelCall = "set";
   else if (base.previousBucket) labelCall = "clear";
-  if (labelCall !== "none") await deps.setLabel(base.did, label);
+  if (labelCall !== "none") await deps.setLabel(base.did, base.direction, label);
 
   deps.store.saveEvaluation({
     did: base.did,
-    followers: base.followers,
+    direction: base.direction,
+    total: base.total,
     counted: counts.counted,
     takendown: counts.takendown,
     bucket,

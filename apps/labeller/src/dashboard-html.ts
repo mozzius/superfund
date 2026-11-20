@@ -211,15 +211,19 @@ export const dashboardHtml = html`<!doctype html>
     try { return new Date(iso).toLocaleString(); } catch { return iso; }
   };
 
+  // bsky.app can't open "handle.invalid", so those link by DID.
+  const profileId = (did, handle) =>
+    typeof handle === "string" && handle !== "handle.invalid" ? handle : did;
+
   const bskyPostUrl = (uri, handle) => {
     // at://did:plc:xxx/app.bsky.feed.post/rkey
     const m = uri.match(/^at:\/\/([^/]+)\/app\.bsky\.feed\.post\/(.+)$/);
     if (!m) return null;
-    return "https://bsky.app/profile/" + (handle ?? m[1]) + "/post/" + m[2];
+    return "https://bsky.app/profile/" + profileId(m[1], handle) + "/post/" + m[2];
   };
 
   const bskyProfileUrl = (did, handle) =>
-    "https://bsky.app/profile/" + (handle ?? did);
+    "https://bsky.app/profile/" + profileId(did, handle);
 
   // Sentinel returned when getProfile says the account is gone (suspended /
   // deactivated / taken down) — we hide these entries entirely.
@@ -380,10 +384,7 @@ export const dashboardHtml = html`<!doctype html>
     const urls = currentAccounts
       .filter((acc) => currentHandles[acc.did] !== HIDDEN)
       .filter((acc) => !hideBots || !currentBots.has(acc.did))
-      .map((acc) => {
-        const handle = currentHandles[acc.did];
-        return "https://bsky.app/profile/" + (handle ?? acc.did);
-      });
+      .map((acc) => bskyProfileUrl(acc.did, currentHandles[acc.did]));
     if (!urls.length) {
       setCopyStatus("nothing to copy");
       return;
